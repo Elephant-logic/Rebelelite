@@ -16,10 +16,36 @@ const io = new Server(server, {
   pingInterval: 25000
 });
 
+app.get('/', (req, res) => {
+  res.sendFile(path.join(__dirname, 'public', 'landing.html'));
+});
+
 app.use(express.static(path.join(__dirname, 'public')));
 
 // In-memory room state (per room: owner, lock state, users)
 const rooms = Object.create(null);
+const roomDirectory = new Map();
+
+function normalizeRoomName(roomName) {
+  if (!roomName || typeof roomName !== 'string') return '';
+  return roomName.trim().slice(0, 50);
+}
+
+function getRoomDirectoryEntry(roomName) {
+  const name = normalizeRoomName(roomName);
+  if (!name) return null;
+  if (!roomDirectory.has(name)) {
+    roomDirectory.set(name, {
+      name,
+      ownerPassword: null,
+      public: true,
+      live: false,
+      viewers: 0,
+      title: null
+    });
+  }
+  return roomDirectory.get(name);
+}
 
 function getRoomInfo(roomName) {
   if (!rooms[roomName]) {
@@ -85,6 +111,10 @@ io.on('connection', (socket) => {
     const displayName = rawName.slice(0, 30);
 
     const info = getRoomInfo(roomName);
+    const directoryEntry = getRoomDirectoryEntry(roomName);
+    if (directoryEntry && !directoryEntry.title) {
+      directoryEntry.title = info.streamTitle;
+    }
 
     if (info.locked && info.ownerId && info.ownerId !== socket.id) {
       socket.emit('room-error', 'Room is locked by host');
@@ -168,6 +198,10 @@ io.on('connection', (socket) => {
     const info = rooms[roomName];
     if (!requireOwner(info, socket)) return;
     info.streamTitle = (title || 'Untitled Stream').slice(0, 100);
+    const directoryEntry = getRoomDirectoryEntry(roomName);
+    if (directoryEntry) {
+      directoryEntry.title = info.streamTitle;
+    }
     broadcastRoomUpdate(roomName);
   });
 
@@ -268,9 +302,16 @@ io.on('connection', (socket) => {
     const info = rooms[roomName];
     if (!info) return;
     info.users.delete(socket.id);
+    const directoryEntry = getRoomDirectoryEntry(roomName);
+    if (directoryEntry && socket.data.isViewer) {
+      directoryEntry.viewers = Math.max(0, directoryEntry.viewers - 1);
+    }
 
     if (info.ownerId === socket.id) {
       info.ownerId = null;
+      if (directoryEntry) {
+        directoryEntry.live = false;
+      }
     }
 
     socket.to(roomName).emit('user-left', { id: socket.id });

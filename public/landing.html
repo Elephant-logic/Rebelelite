@@ -1,0 +1,79 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <title>Rebel Stream • Landing</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <link rel="stylesheet" href="style.css" />
+  <script src="https://cdn.socket.io/4.8.1/socket.io.min.js"></script>
+</head>
+<body>
+  <div class="app-shell landing-shell">
+    <header class="topbar">
+      <div>
+        <h1 class="logo-text">Rebel <span class="logo-highlight">Stream</span></h1>
+        <p class="subtitle">Secure P2P • Live Stream • Chat • Arcade</p>
+      </div>
+      <div class="status-block">
+        <span class="status-dot status-connected">Live Directory</span>
+        <span class="room-info">Claim your room or host instantly.</span>
+      </div>
+    </header>
+
+    <main class="landing-grid">
+      <section class="landing-card">
+        <div class="landing-card-header">
+          <h2>Live Public Rooms</h2>
+          <button id="refreshRoomsBtn" class="btn small secondary">Refresh</button>
+        </div>
+        <p class="landing-muted">Discover rooms that are currently live and public.</p>
+        <div id="publicRoomsGrid" class="rooms-grid"></div>
+        <p id="publicRoomsEmpty" class="landing-empty">No live public rooms yet.</p>
+      </section>
+
+      <section class="landing-card">
+        <h2>Claim Your Room Name</h2>
+        <p class="landing-muted">Reserve your show name with a host password. Free for now.</p>
+        <form id="claimRoomForm" class="landing-form">
+          <div class="field">
+            <label>Room Name</label>
+            <input id="claimRoomName" type="text" placeholder="e.g. rebel-night-show" required />
+          </div>
+          <div class="field">
+            <label>Room Password</label>
+            <input id="claimRoomPassword" type="text" placeholder="Choose a host password" required />
+          </div>
+          <div class="field">
+            <label>Privacy</label>
+            <select id="claimRoomPrivacy" class="select-input">
+              <option value="public" selected>Public</option>
+              <option value="private">Private</option>
+            </select>
+          </div>
+          <button class="btn primary full-width" type="submit">Claim Room</button>
+          <div id="claimRoomStatus" class="status-message"></div>
+        </form>
+      </section>
+
+      <section class="landing-card">
+        <h2>Host a Room</h2>
+        <p class="landing-muted">Enter the studio for an existing room name.</p>
+        <form id="hostRoomForm" class="landing-form">
+          <div class="field">
+            <label>Room Name</label>
+            <input id="hostRoomName" type="text" placeholder="e.g. rebel-night-show" required />
+          </div>
+          <div class="field">
+            <label>Host Password (if claimed)</label>
+            <input id="hostRoomPassword" type="text" placeholder="Optional if unclaimed" />
+          </div>
+          <button class="btn primary full-width" type="submit">Enter Host Studio</button>
+          <div id="hostRoomStatus" class="status-message"></div>
+        </form>
+      </section>
+    </main>
+  </div>
+
+  <script src="landing.js"></script>
+</body>
+</html>
