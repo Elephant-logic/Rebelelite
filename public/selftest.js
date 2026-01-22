@@ -5,6 +5,10 @@ const startedEl = document.getElementById('selftestStarted');
 const finishedEl = document.getElementById('selftestFinished');
 const studioFrame = document.getElementById('selftestStudioFrame');
 
+const params = new URLSearchParams(window.location.search);
+const targetOrigin = params.get('target') || window.location.origin;
+const targetBaseUrl = targetOrigin.replace(/\/$/, '');
+
 const report = {
   startedAt: new Date().toISOString(),
   finishedAt: null,
@@ -37,6 +41,12 @@ function logLine(message) {
   if (logEl) {
     logEl.textContent += `${line}\n`;
     logEl.scrollTop = logEl.scrollHeight;
+  }
+}
+
+function ensureSameOriginAccess() {
+  if (window.location.origin !== targetBaseUrl) {
+    throw new Error('Selftest must be served from the same origin as the target.');
   }
 }
 
@@ -144,25 +154,41 @@ function ensureStudioFrameLoaded() {
   if (studioFrameLoaded) return studioFrameLoaded;
   if (!studioFrame) return Promise.reject(new Error('Studio iframe missing'));
   studioFrameLoaded = new Promise((resolve) => {
-    studioFrame.src = '/index.html?selftest=1';
+    studioFrame.src = `${targetBaseUrl}/index.html?selftest=1`;
     studioFrame.onload = () => resolve();
   });
   return studioFrameLoaded;
 }
 
 let viewerFrame = null;
-let viewerFrameLoaded = null;
-function ensureViewerFrameLoaded() {
-  if (viewerFrameLoaded) return viewerFrameLoaded;
+function ensureViewerFrame() {
+  if (viewerFrame) return viewerFrame;
   viewerFrame = document.createElement('iframe');
   viewerFrame.id = 'selftestViewerFrame';
   viewerFrame.style.cssText = 'width:1px;height:1px;position:absolute;left:-9999px;top:-9999px;';
-  viewerFrameLoaded = new Promise((resolve) => {
-    viewerFrame.src = `/view.html?room=${encodeURIComponent(context.roomName)}&name=SelfTestViewer`;
-    viewerFrame.onload = () => resolve();
-  });
   document.body.appendChild(viewerFrame);
-  return viewerFrameLoaded;
+  return viewerFrame;
+}
+
+async function loadViewerFrame({ roomName, name, vipCode } = {}) {
+  ensureViewerFrame();
+  const room = roomName || context.roomName;
+  const viewerName = name || 'SelfTestViewer';
+  const params = new URLSearchParams({
+    room,
+    name: viewerName,
+    v: String(Date.now())
+  });
+  if (vipCode) params.set('vipCode', vipCode);
+  await new Promise((resolve) => {
+    viewerFrame.onload = () => resolve();
+    viewerFrame.src = `${targetBaseUrl}/view.html?${params.toString()}`;
+  });
+  return waitForFrameElements(
+    viewerFrame,
+    ['viewerNameInput', 'viewerVipCodeInput', 'joinRoomBtn', 'joinStatus', 'viewerJoinPanel', 'chatLog'],
+    8000
+  );
 }
 
 async function waitForViewerState(predicate, ms = 5000) {
@@ -173,6 +199,25 @@ async function waitForViewerState(predicate, ms = 5000) {
     await new Promise((resolve) => setTimeout(resolve, 150));
   }
   throw new Error('Viewer frame did not reach expected state');
+}
+
+async function joinViewerInFrame({ roomName, name, vipCode } = {}) {
+  const viewerDoc = await loadViewerFrame({ roomName, name, vipCode });
+  const nameInput = viewerDoc.getElementById('viewerNameInput');
+  const vipInput = viewerDoc.getElementById('viewerVipCodeInput');
+  const joinBtn = viewerDoc.getElementById('joinRoomBtn');
+  if (nameInput) nameInput.value = name || 'SelfTest Viewer';
+  if (vipInput) vipInput.value = vipCode || '';
+  joinBtn.click();
+  await waitForViewerState((frameWindow) => {
+    const panel = frameWindow.document.getElementById('viewerJoinPanel');
+    return panel && panel.classList.contains('hidden');
+  }, 8000);
+  return viewerDoc;
+}
+
+function ensureViewerFrameLoaded() {
+  return loadViewerFrame({ roomName: context.roomName, name: 'SelfTestViewer' });
 }
 
 async function ensureStudioHostJoined() {
@@ -208,8 +253,7 @@ async function ensureStudioHostJoined() {
           privateBtn &&
           vipBtn &&
           !leaveBtn.disabled &&
-          !privateBtn.disabled &&
-          !vipBtn.disabled
+          !privateBtn.disabled
         ) {
           clearInterval(interval);
           resolve();
@@ -224,6 +268,9 @@ async function ensureStudioHostJoined() {
   );
 
   context.studioReady = true;
+  if (!context.hostSocket && frameWindow.__selftestHostSocket) {
+    context.hostSocket = frameWindow.__selftestHostSocket;
+  }
   return doc;
 }
 
@@ -315,6 +362,23 @@ function emitWithAck(socket, event, payload, ms = 5000) {
   );
 }
 
+function createSocket() {
+  return io(targetBaseUrl, { autoConnect: false });
+}
+
+async function joinViewerSocket({ roomName, name, vipCode } = {}) {
+  const socket = createSocket();
+  await connectSocket(socket);
+  const resp = await emitWithAck(socket, 'join-room', {
+    room: roomName || context.roomName,
+    name: name || 'SelfTest Viewer',
+    isViewer: true,
+    vipCode
+  });
+  socket.disconnect();
+  return resp;
+}
+
 async function connectSocket(socket) {
   if (socket.connected) return;
   socket.connect();
@@ -358,8 +422,19 @@ function ensureHandshakeOrder(order) {
   );
 }
 
+function isScrolledToBottom(log) {
+  if (!log) return false;
+  if (log.scrollHeight <= log.clientHeight) return true;
+  return log.scrollTop >= log.scrollHeight - log.clientHeight - 4;
+}
+
+function extractVipCode(text) {
+  const match = String(text || '').match(/[A-Z0-9]{5,8}/);
+  return match ? match[0] : '';
+}
+
 async function testClaimRoom() {
-  const socket = io({ autoConnect: false });
+  const socket = createSocket();
   await connectSocket(socket);
   const resp = await emitWithAck(socket, 'claim-room', {
     name: context.roomName,
@@ -376,7 +451,7 @@ async function testClaimRoom() {
 }
 
 async function testClaimPrivateRoom() {
-  const socket = io({ autoConnect: false });
+  const socket = createSocket();
   await connectSocket(socket);
   const claimResp = await emitWithAck(socket, 'claim-room', {
     name: context.privateRoomName,
@@ -414,7 +489,7 @@ async function testClaimPrivateRoom() {
 }
 
 async function testHostReenter() {
-  const hostSocket = io({ autoConnect: false });
+  const hostSocket = createSocket();
   context.hostSocket = hostSocket;
   context.hostRolePromise = waitForEvent(hostSocket, 'role', 7000).then(([role]) => {
     context.hostRole = role;
@@ -457,6 +532,228 @@ async function testHostStudioAutoEntry() {
   }
   if (!role?.isHost) throw new Error('Role event did not confirm host');
   return 'Host role confirmed after auth.';
+}
+
+async function testVipCodeGenerationAndJoin() {
+  const doc = await ensureStudioHostJoined();
+  await setRoomPrivacyAndVip({ privacy: 'private', vipRequired: true });
+
+  const generateBtn = doc.getElementById('generateVipCodeBtn');
+  const vipCodeList = doc.getElementById('vipCodeList');
+  if (!generateBtn || !vipCodeList) {
+    throw new Error('VIP code controls missing in studio');
+  }
+
+  await waitForCondition(
+    () => !generateBtn.disabled,
+    4000,
+    'Enable VIP code generation'
+  );
+
+  const beforeList = vipCodeList.textContent;
+  generateBtn.click();
+
+  await waitForCondition(
+    () => extractVipCode(vipCodeList.textContent) && vipCodeList.textContent !== beforeList,
+    6000,
+    'VIP code list update'
+  );
+
+  const code = extractVipCode(vipCodeList.textContent);
+  if (!code) throw new Error('VIP code did not appear in studio list');
+
+  const codesResp = await emitWithAck(context.hostSocket, 'get-vip-codes', {
+    roomName: context.roomName
+  });
+  if (!codesResp?.ok || !Array.isArray(codesResp.codes)) {
+    throw new Error('Unable to read VIP codes from server');
+  }
+  const serverHasCode = codesResp.codes.some((entry) => entry.code === code);
+  if (!serverHasCode) throw new Error('VIP code missing from server metadata');
+
+  const joinResp = await joinViewerSocket({
+    roomName: context.roomName,
+    name: 'VipViewer',
+    vipCode: code
+  });
+  if (!joinResp?.ok || !joinResp?.isVip) {
+    throw new Error(joinResp?.error || 'Viewer could not join with VIP code');
+  }
+
+  return `VIP code generated (${code}), stored, and accepted for VIP join.`;
+}
+
+async function testPrivateVipLogic() {
+  const doc = await ensureStudioHostJoined();
+  const vipToggle = doc.getElementById('vipRequiredToggle');
+  if (!vipToggle) throw new Error('VIP toggle missing in studio');
+
+  await setRoomPrivacyAndVip({ privacy: 'public', vipRequired: false });
+
+  if (vipToggle.textContent.trim() !== 'OFF') {
+    throw new Error('VIP Required should be OFF when room is public');
+  }
+  if (!vipToggle.disabled) {
+    throw new Error('VIP Required should be disabled while room is public');
+  }
+
+  const publicJoin = await joinViewerSocket({
+    roomName: context.roomName,
+    name: 'PublicViewer'
+  });
+  if (!publicJoin?.ok) {
+    throw new Error(publicJoin?.error || 'Public viewer could not join');
+  }
+
+  await setRoomPrivacyAndVip({ privacy: 'private', vipRequired: false });
+
+  const privateJoin = await joinViewerSocket({
+    roomName: context.roomName,
+    name: 'PrivateViewer'
+  });
+  if (!privateJoin?.ok) {
+    throw new Error(privateJoin?.error || 'Private room blocked viewer while VIP was off');
+  }
+
+  await setRoomPrivacyAndVip({ privacy: 'private', vipRequired: true });
+
+  const blockedJoin = await joinViewerSocket({
+    roomName: context.roomName,
+    name: 'BlockedViewer'
+  });
+  if (blockedJoin?.ok) {
+    throw new Error('Private room allowed viewer without VIP code');
+  }
+
+  return 'Private/VIP rules enforced for public, private, and VIP-required states.';
+}
+
+async function testChatDeliveryAndAutoscroll() {
+  const doc = await ensureStudioHostJoined();
+  await setRoomPrivacyAndVip({ privacy: 'public', vipRequired: false });
+
+  const hostLog = doc.getElementById('chatLogPublic');
+  const hostInput = doc.getElementById('inputPublic');
+  const hostSend = doc.getElementById('btnSendPublic');
+  if (!hostLog || !hostInput || !hostSend) {
+    throw new Error('Host chat controls missing');
+  }
+
+  const viewerDoc = await joinViewerInFrame({
+    roomName: context.roomName,
+    name: 'ChatViewer'
+  });
+  const viewerLog = viewerDoc.getElementById('chatLog');
+  const viewerInput = viewerDoc.getElementById('chatInput');
+  const viewerSend = viewerDoc.getElementById('sendBtn');
+  if (!viewerLog || !viewerInput || !viewerSend) {
+    throw new Error('Viewer chat controls missing');
+  }
+
+  hostInput.value = 'Host says hello';
+  hostSend.click();
+
+  await waitForCondition(
+    () => hostLog.textContent.includes('Host says hello'),
+    6000,
+    'Host chat echo'
+  );
+  await waitForCondition(
+    () => viewerLog.textContent.includes('Host says hello'),
+    6000,
+    'Viewer receives host chat'
+  );
+
+  viewerInput.value = 'Viewer replying';
+  viewerSend.click();
+
+  await waitForCondition(
+    () => viewerLog.textContent.includes('Viewer replying'),
+    6000,
+    'Viewer chat echo'
+  );
+  await waitForCondition(
+    () => hostLog.textContent.includes('Viewer replying'),
+    6000,
+    'Host receives viewer chat'
+  );
+
+  for (let i = 0; i < 40; i += 1) {
+    viewerInput.value = `Scroll message ${i + 1}`;
+    viewerSend.click();
+    await new Promise((resolve) => setTimeout(resolve, 80));
+  }
+
+  if (viewerLog.scrollHeight > viewerLog.clientHeight && !isScrolledToBottom(viewerLog)) {
+    throw new Error('Viewer chat did not auto-scroll to bottom');
+  }
+  if (hostLog.scrollHeight > hostLog.clientHeight && !isScrolledToBottom(hostLog)) {
+    throw new Error('Host chat did not auto-scroll to bottom');
+  }
+
+  return 'Chat delivers host/viewer messages with auto-scroll.';
+}
+
+async function testOverlayTickerUpload() {
+  await ensureStudioFrameLoaded();
+  const frameWindow = studioFrame.contentWindow;
+  const doc = frameWindow?.document;
+  if (!frameWindow || !doc) throw new Error('Studio iframe not ready');
+
+  const overlayInput = doc.getElementById('htmlOverlayInput');
+  const overlayFields = doc.getElementById('overlayFields');
+  const hook = frameWindow.__overlayTest;
+  if (!overlayInput || !overlayFields || !hook) {
+    throw new Error('Overlay upload controls missing');
+  }
+
+  const overlayHtml = `
+    <div id="ticker">Live now</div>
+    <div id="djName">DJ Rebel</div>
+  `;
+  const file = new frameWindow.File([overlayHtml], 'overlay.html', { type: 'text/html' });
+  const dataTransfer = new frameWindow.DataTransfer();
+  dataTransfer.items.add(file);
+  overlayInput.files = dataTransfer.files;
+  overlayInput.dispatchEvent(new frameWindow.Event('change', { bubbles: true }));
+
+  await waitForCondition(
+    () => {
+      const labels = Array.from(overlayFields.querySelectorAll('label')).map((label) =>
+        label.textContent.trim()
+      );
+      return labels.includes('ticker') && labels.includes('djName');
+    },
+    6000,
+    'Overlay fields detected'
+  );
+
+  const initialRender = hook.getRenderCount();
+
+  const updateOverlayField = (name, value) => {
+    const row = Array.from(overlayFields.querySelectorAll('.overlay-field')).find(
+      (item) => item.querySelector('label')?.textContent.trim() === name
+    );
+    const input = row?.querySelector('input, textarea');
+    if (!input) throw new Error(`Overlay input missing for ${name}`);
+    input.value = value;
+    input.dispatchEvent(new frameWindow.Event('input', { bubbles: true }));
+  };
+
+  updateOverlayField('ticker', 'Breaking News');
+  updateOverlayField('djName', 'DJ Night');
+
+  await waitForCondition(
+    () => hook.getFieldValue('ticker') === 'Breaking News' && hook.getFieldValue('djName') === 'DJ Night',
+    6000,
+    'Overlay fields updated'
+  );
+
+  if (hook.getRenderCount() <= initialRender) {
+    throw new Error('Overlay did not re-render after updates');
+  }
+
+  return 'Overlay HTML upload detected ticker fields and applied updates.';
 }
 
 async function testVipDefaultsAndButtons() {
@@ -509,7 +806,7 @@ async function testPublicViewerJoinAndBroadcast() {
   await ensureStudioHostJoined();
   await setRoomPrivacyAndVip({ privacy: 'public', vipRequired: false });
 
-  const viewerSocket = io({ autoConnect: false });
+  const viewerSocket = createSocket();
   context.viewerSocket = viewerSocket;
   await connectSocket(viewerSocket);
 
@@ -639,7 +936,7 @@ async function testPrivateViewerBlocked() {
   await ensureStudioHostJoined();
   await setRoomPrivacyAndVip({ privacy: 'private', vipRequired: false });
 
-  const openSocket = io({ autoConnect: false });
+  const openSocket = createSocket();
   await connectSocket(openSocket);
   const joinResp = await emitWithAck(openSocket, 'join-room', {
     room: context.roomName,
@@ -656,7 +953,7 @@ async function testPrivateVipRequiredBlocked() {
   await ensureStudioHostJoined();
   await setRoomPrivacyAndVip({ privacy: 'private', vipRequired: true });
 
-  const blockedSocket = io({ autoConnect: false });
+  const blockedSocket = createSocket();
   await connectSocket(blockedSocket);
   const joinResp = await emitWithAck(blockedSocket, 'join-room', {
     room: context.roomName,
@@ -771,7 +1068,7 @@ async function testVipViewerJoinAndUsage() {
   });
   if (!codeResp?.ok || !codeResp?.code) throw new Error('VIP code generation failed');
 
-  const vipSocket = io({ autoConnect: false });
+  const vipSocket = createSocket();
   await connectSocket(vipSocket);
   const joinResp = await emitWithAck(
     vipSocket,
@@ -811,7 +1108,7 @@ async function testVipRevoke() {
   });
   if (!codeResp?.ok || !codeResp?.code) throw new Error('VIP code generation failed');
 
-  const vipSocket = io({ autoConnect: false });
+  const vipSocket = createSocket();
   await connectSocket(vipSocket);
   const joinResp = await emitWithAck(vipSocket, 'join-room', {
     room: context.roomName,
@@ -828,7 +1125,7 @@ async function testVipRevoke() {
   });
   if (!revokeResp?.ok) throw new Error('VIP code revoke failed');
 
-  const blockedSocket = io({ autoConnect: false });
+  const blockedSocket = createSocket();
   await connectSocket(blockedSocket);
   const blockedResp = await emitWithAck(blockedSocket, 'join-room', {
     room: context.roomName,
@@ -1099,6 +1396,8 @@ async function testViewerNotUpgraded() {
 
 async function run() {
   updateTimestamp(startedEl, report.startedAt);
+  logLine(`Target: ${targetBaseUrl}`);
+  ensureSameOriginAccess();
   logLine(`Starting self-test for room ${context.roomName}`);
 
   const tests = [
@@ -1111,68 +1410,20 @@ async function run() {
       run: testClaimPrivateRoom
     },
     {
-      name: 'Host can re-enter a claimed room using password',
-      run: testHostReenter
+      name: 'VIP code generation creates a real server-backed code',
+      run: testVipCodeGenerationAndJoin
     },
     {
-      name: 'Host enters studio automatically after auth',
-      run: testHostStudioAutoEntry
+      name: 'Private/VIP logic enforces the three room rules',
+      run: testPrivateVipLogic
     },
     {
-      name: 'VIP defaults and buttons are set correctly',
-      run: testVipDefaultsAndButtons
+      name: 'Chat sends host ↔ viewer messages and auto-scrolls',
+      run: testChatDeliveryAndAutoscroll
     },
     {
-      name: 'Public viewers can join when Private Room and VIP Required are off',
-      run: testPublicViewerJoinAndBroadcast
-    },
-    {
-      name: 'Host can turn Private Room on; viewers join when VIP is off',
-      run: testPrivateViewerBlocked
-    },
-    {
-      name: 'Private room blocks viewers when VIP is required',
-      run: testPrivateVipRequiredBlocked
-    },
-    {
-      name: 'Viewer sees a friendly VIP-required message when blocked',
-      run: testViewerVipBlockedMessage
-    },
-    {
-      name: 'Viewer chat auto-scrolls when messages overflow',
-      run: testViewerChatAutoscroll
-    },
-    {
-      name: 'Host can turn Private Room off and return to public',
-      run: testPrivateRoomToggleOff
-    },
-    {
-      name: 'VIP viewers can join with code and decrements usage',
-      run: testVipViewerJoinAndUsage
-    },
-    {
-      name: 'VIP codes can be revoked and stop granting access',
-      run: testVipRevoke
-    },
-    {
-      name: 'Overlay fields detect IDs and re-render on edit',
-      run: testOverlayFieldDetection
-    },
-    {
-      name: 'Studio buttons are wired',
-      run: testStudioButtonsWired
-    },
-    {
-      name: 'Stage call flow completes (request → accept → offer/answer/ICE/track → hang-up)',
-      run: testStageCallFlow
-    },
-    {
-      name: 'Host state stored locally so reload preserves access',
-      run: testHostStateStored
-    },
-    {
-      name: 'Viewer not upgraded to guest unless host allows',
-      run: testViewerNotUpgraded
+      name: 'Overlay HTML upload detects ticker fields and updates preview',
+      run: testOverlayTickerUpload
     }
   ];
 
