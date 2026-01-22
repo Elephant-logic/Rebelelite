@@ -540,9 +540,18 @@ async function testVipCodeGenerationAndJoin() {
 
   const generateBtn = doc.getElementById('generateVipCodeBtn');
   const vipCodeList = doc.getElementById('vipCodeList');
+  const vipInput = doc.getElementById('vipUserInput');
+  const addVipBtn = doc.getElementById('addVipUserBtn');
   if (!generateBtn || !vipCodeList) {
     throw new Error('VIP code controls missing in studio');
   }
+  if (!vipInput || !addVipBtn) {
+    throw new Error('VIP username controls missing in studio');
+  }
+
+  vipInput.value = 'VipViewer';
+  vipInput.dispatchEvent(new Event('input', { bubbles: true }));
+  addVipBtn.click();
 
   await waitForCondition(
     () => !generateBtn.disabled,
@@ -611,18 +620,8 @@ async function testPrivateVipLogic() {
     roomName: context.roomName,
     name: 'PrivateViewer'
   });
-  if (!privateJoin?.ok) {
-    throw new Error(privateJoin?.error || 'Private room blocked viewer while VIP was off');
-  }
-
-  await setRoomPrivacyAndVip({ privacy: 'private', vipRequired: true });
-
-  const blockedJoin = await joinViewerSocket({
-    roomName: context.roomName,
-    name: 'BlockedViewer'
-  });
-  if (blockedJoin?.ok) {
-    throw new Error('Private room allowed viewer without VIP code');
+  if (privateJoin?.ok) {
+    throw new Error('Private room allowed viewer without VIP username');
   }
 
   const vipInput = doc.getElementById('vipUserInput');
@@ -643,9 +642,19 @@ async function testPrivateVipLogic() {
     throw new Error(vipNameJoin?.error || 'VIP username did not grant access');
   }
 
+  await setRoomPrivacyAndVip({ privacy: 'private', vipRequired: true });
+
+  const blockedJoin = await joinViewerSocket({
+    roomName: context.roomName,
+    name: 'ListVip'
+  });
+  if (blockedJoin?.ok) {
+    throw new Error('Private room allowed VIP username without code');
+  }
+
   const invalidCodeJoin = await joinViewerSocket({
     roomName: context.roomName,
-    name: 'InvalidVip',
+    name: 'ListVip',
     vipCode: 'BADCODE'
   });
   if (invalidCodeJoin?.ok) {
@@ -819,6 +828,9 @@ async function testVipDefaultsAndButtons() {
 
   await setStudioToggle(doc, 'togglePrivateBtn', 'ON');
   await waitForRoomInfo({ privacy: 'private' });
+  await waitForCondition(() => generateBtn.disabled, 2000, 'Keep VIP code disabled without VIP requirement');
+
+  await setStudioToggle(doc, 'vipRequiredToggle', 'ON');
   await waitForCondition(() => !generateBtn.disabled, 2000, 'Enable VIP code button');
 
   await setStudioToggle(doc, 'togglePrivateBtn', 'OFF');
@@ -971,8 +983,8 @@ async function testPrivateViewerBlocked() {
     isViewer: true
   });
   openSocket.disconnect();
-  if (!joinResp?.ok) throw new Error('Private room blocked viewer while VIP was off');
-  return 'Private room allowed viewer when VIP requirement is off.';
+  if (joinResp?.ok) throw new Error('Private room allowed viewer without VIP username');
+  return 'Private room blocked non-VIP viewer when VIP list is required.';
 }
 
 async function testPrivateVipRequiredBlocked() {
@@ -1089,6 +1101,10 @@ async function testVipViewerJoinAndUsage() {
   if (!context.hostSocket) throw new Error('Host socket not initialized');
   await ensureStudioHostJoined();
   await setRoomPrivacyAndVip({ privacy: 'private', vipRequired: true });
+  await emitWithAck(context.hostSocket, 'add-vip-user', {
+    room: context.roomName,
+    userName: 'VipViewer'
+  });
   const codeResp = await emitWithAck(context.hostSocket, 'generate-vip-code', {
     room: context.roomName,
     maxUses: 1
@@ -1129,6 +1145,10 @@ async function testVipRevoke() {
   if (!context.hostSocket) throw new Error('Host socket not initialized');
   await ensureStudioHostJoined();
   await setRoomPrivacyAndVip({ privacy: 'private', vipRequired: true });
+  await emitWithAck(context.hostSocket, 'add-vip-user', {
+    room: context.roomName,
+    userName: 'VipViewerOnce'
+  });
   const codeResp = await emitWithAck(context.hostSocket, 'generate-vip-code', {
     room: context.roomName,
     maxUses: 2

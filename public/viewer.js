@@ -479,6 +479,9 @@ function appendChat(name, text) {
 
 function getFriendlyVipMessage(error, hasCode) {
   const normalizedError = (error || '').toLowerCase();
+  if (normalizedError.includes('username')) {
+    return 'This private room only allows VIP usernames. Ask the host to add your name.';
+  }
   if (normalizedError.includes('invalid') || normalizedError.includes('exhausted')) {
     return 'That VIP code didn’t work. Please check with the host for a fresh code.';
   }
@@ -544,12 +547,21 @@ async function hydrateRoomInfo(roomName) {
     state.vipRequired = info.vipRequired;
   }
   const vipLabel = $('viewerVipLabel');
+  const vipInput = $('viewerVipCodeInput');
   if (vipLabel) {
     const required = state.roomPrivacy === 'private' && state.vipRequired;
-    vipLabel.textContent =
-      required
-        ? 'VIP Code (required for private rooms)'
-        : 'VIP Code (optional)';
+    vipLabel.textContent = required
+      ? 'VIP Code (required for VIP-code rooms)'
+      : 'VIP Code (only needed if host enables VIP codes)';
+    if (vipInput) {
+      vipInput.disabled = !required;
+      if (!required) {
+        vipInput.value = '';
+        vipInput.placeholder = 'Not required';
+      } else {
+        vipInput.placeholder = 'e.g. 8XFA12';
+      }
+    }
   }
 }
 
@@ -643,7 +655,7 @@ window.addEventListener('load', () => {
             const errorText = resp?.error || '';
             const hasVipCode = !!codeValue;
             const vipMessage =
-              state.roomPrivacy === 'private' && state.vipRequired
+              state.roomPrivacy === 'private'
                 ? getFriendlyVipMessage(errorText, hasVipCode)
                 : '';
             joinStatus.textContent = vipMessage || errorText || 'Unable to join room.';
