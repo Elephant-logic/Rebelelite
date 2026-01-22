@@ -4,6 +4,29 @@
 // viewer broadcast, chat, arcade file push, and HTML overlay engine.
 
 // ======================================================
+// SIGNALING MAP (Current Behavior - No Changes)
+// ======================================================
+// [HOST]  -> (join-room)        -> [SERVER]
+// [VIEWER]-> (join-room)        -> [SERVER]
+// [HOST]  -> (webrtc-offer)     -> [SERVER] -> [VIEWER]
+// [VIEWER]-> (webrtc-answer)    -> [SERVER] -> [HOST]
+// [HOST]  -> (ice-candidate)    -> [SERVER] -> [VIEWER]
+// [VIEWER]-> (ice-candidate)    -> [SERVER] -> [HOST]
+// (Call mode uses call-offer/call-answer/call-ice in the same relay pattern.)
+
+// ======================================================
+// WEBRTC HANDSHAKE FLOW (Host Broadcast - Existing Order)
+// ======================================================
+// 1) Host joins room (join-room) and becomes owner.
+// 2) Host starts local cam/mic and mixer canvas.
+// 3) Viewer joins room (join-room).
+// 4) Server relays host offer -> viewer.
+// 5) Viewer returns answer -> host.
+// 6) ICE candidates are exchanged both directions.
+// 7) PeerConnection becomes connected.
+// 8) Viewer displays mixed canvas stream.
+
+// ======================================================
 // 1. ARCADE ENGINE (P2P File Transfer)
 // ======================================================
 const CHUNK_SIZE = 16 * 1024; // 16KB chunks (Safe WebRTC limit)
@@ -763,18 +786,48 @@ function stopScreenShare() {
 // ======================================================
 // 8. BROADCAST STREAMING
 // ======================================================
-async function handleStartStream() {
-  if (!state.currentRoom || !state.iAmHost) return;
+
+/**
+ * Update the host UI button label/state for broadcast control.
+ * Called when the host toggles streaming. No signaling occurs here.
+ */
+function updateStreamButton(isLive) {
+    const startBtn = $('startStreamBtn'); //
+    if (!startBtn) return; //
+    startBtn.textContent = isLive ? "Stop Stream" : "Start Stream"; //
+    startBtn.classList.toggle('danger', isLive); //
+}
+
+/**
+ * Stop broadcast streaming (host side only).
+ * Called when the host clicks "Stop Stream".
+ * PeerConnection impact: closes all viewer PeerConnections.
+ */
+function stopStream() {
+    isStreaming = false; //
+    updateStreamButton(false); //
+
+    Object.values(viewerPeers).forEach(pc => pc.close()); //
+    for (const k in viewerPeers) {
+        delete viewerPeers[k]; //
+    }
+}
+
+/**
+ * Start broadcast streaming (host side only).
+ * Called when the host clicks "Start Stream".
+ * Signaling direction: [HOST] -> (webrtc-offer) -> [SERVER] -> [VIEWER]
+ * PeerConnection impact: creates viewer PeerConnections and sends offers.
+ */
+async function startStream() {
+    if (!currentRoom || !iAmHost) return; //
 
   if (!state.localStream) {
     await startLocalMedia();
   }
 
-  state.isStreaming = true;
-  if (dom.startStreamBtn) {
-    dom.startStreamBtn.textContent = 'Stop Stream';
-    dom.startStreamBtn.classList.add('danger');
-  }
+    isStreaming = true; //
+    updateStreamButton(true); //
 
   state.latestUserList.forEach((u) => {
     if (u.id !== state.myId) {
@@ -783,61 +836,114 @@ async function handleStartStream() {
   });
 }
 
-if (dom.startStreamBtn) {
-  dom.startStreamBtn.onclick = async () => {
-    if (!state.currentRoom || !state.iAmHost) {
-      alert('Host only.');
-      return;
-    }
-    if (state.isStreaming) {
-      state.isStreaming = false;
-      dom.startStreamBtn.textContent = 'Start Stream';
-      dom.startStreamBtn.classList.remove('danger');
-
-      Object.values(viewerPeers).forEach((pc) => pc.close());
-      for (const k in viewerPeers) {
-        delete viewerPeers[k];
-      }
-    } else {
-      await handleStartStream();
-    }
-  };
+const startStreamBtn = $('startStreamBtn'); //
+if (startStreamBtn) {
+    startStreamBtn.onclick = async () => {
+        if (!currentRoom || !iAmHost) {
+            alert("Host only."); //
+            return;
+        }
+        if (isStreaming) {
+            stopStream(); //
+        } else {
+            await startStream(); //
+        }
+    };
 }
 
 // ======================================================
 // 9. P2P CALLING (1-to-1)
 // ======================================================
-if (dom.hangupBtn) {
-  dom.hangupBtn.onclick = () => {
-    Object.keys(callPeers).forEach((id) => endPeerCall(id));
-  };
+
+/**
+ * Create and wire a 1-to-1 call PeerConnection.
+ * Called for both outgoing calls (host rings) and incoming calls (viewer rings).
+ * Signaling direction: [HOST|VIEWER] <-> (call-ice) <-> [SERVER]
+ * PeerConnection impact: registers ICE + track handlers.
+ */
+function setupCallPeerConnection(targetId, name) {
+    const pc = new RTCPeerConnection(iceConfig); //
+    callPeers[targetId] = { pc, name }; //
+
+    pc.onicecandidate = e => {
+        if (e.candidate) {
+            socket.emit('call-ice', {
+                targetId,
+                candidate: e.candidate
+            }); //
+        }
+    };
+
+    pc.ontrack = e => addRemoteVideo(targetId, e.streams[0]); //
+    return pc; //
 }
 
-socket.on('ring-alert', async ({ from, fromId }) => {
-  if (confirm(`Incoming call from ${from}. Accept?`)) {
-    await callPeer(fromId);
-  }
-});
+/**
+ * Attach local cam/mic tracks to a call PeerConnection.
+ * Called right before creating offers/answers.
+ * PeerConnection impact: adds local media tracks for the call.
+ */
+function attachLocalTracksToCall(pc) {
+    if (!localStream) return; //
+    localStream.getTracks().forEach(t => pc.addTrack(t, localStream)); //
+}
 
-socket.on('call-request-received', ({ id, name }) => {
-  const privateLog = $('chatLogPrivate');
-  if (privateLog) {
-    const div = document.createElement('div');
-    div.className = 'chat-line system-msg';
-    div.style.color = 'var(--accent)';
-    div.innerHTML = `<strong>✋ CALL REQUEST:</strong> ${name} wants to join the stream.`;
-    privateLog.appendChild(div);
-    privateLog.scrollTop = privateLog.scrollHeight;
-  }
+const hangupBtn = $('hangupBtn'); //
+if (hangupBtn) {
+    hangupBtn.onclick = () => {
+        Object.keys(callPeers).forEach(id => endPeerCall(id)); //
+    };
+}
 
-  const doRing = confirm(`${name} has requested to join the stream.\n\nRing them now?`);
-  if (doRing && window.ringUser) {
-    window.ringUser(id);
-  }
+/**
+ * Handle an incoming ring alert from the server.
+ * Called when server relays a ring-user event.
+ * Signaling direction: [HOST|VIEWER] -> (ring-user) -> [SERVER] -> [TARGET]
+ */
+async function handleRingAlert({ from, fromId }) {
+    if (confirm(`Incoming call from ${from}. Accept?`)) {
+        await callPeer(fromId); //
+    }
+}
 
-  renderUserList();
-});
+socket.on('ring-alert', handleRingAlert);
 
+// Listener for Viewer "Hand Raise" call requests
+/**
+ * Handle a viewer "raise hand" request.
+ * Called when the server notifies the host.
+ * Signaling direction: [VIEWER] -> (request-to-call) -> [SERVER] -> [HOST]
+ */
+function handleCallRequestReceived({ id, name }) {
+    const privateLog = $('chatLogPrivate'); //
+    if (privateLog) {
+        const div = document.createElement('div'); //
+        div.className = 'chat-line system-msg'; //
+        div.style.color = "var(--accent)"; //
+        div.innerHTML = `<strong>✋ CALL REQUEST:</strong> ${name} wants to join the stream.`; //
+        privateLog.appendChild(div); //
+        privateLog.scrollTop = privateLog.scrollHeight; //
+    }
+
+    // NEW: behave like a call – give you a choice to ring them now
+    const doRing = confirm(
+        `${name} has requested to join the stream.\n\nRing them now?`
+    ); //
+    if (doRing && window.ringUser) {
+        window.ringUser(id); //
+    }
+
+    renderUserList(); //
+}
+
+socket.on('call-request-received', handleCallRequestReceived);
+
+/**
+ * Create an outgoing call offer to a peer.
+ * Called after the host accepts a ring or initiates a call.
+ * Signaling direction: [HOST] -> (call-offer) -> [SERVER] -> [VIEWER]
+ * PeerConnection impact: creates offer + local description.
+ */
 async function callPeer(targetId) {
   if (!state.localStream) {
     await startLocalMedia();
@@ -855,64 +961,76 @@ async function callPeer(targetId) {
     }
   };
 
-  pc.ontrack = (e) => addRemoteVideo(targetId, e.streams[0]);
-
-  state.localStream.getTracks().forEach((t) => pc.addTrack(t, state.localStream));
-
-  const offer = await pc.createOffer();
-  await pc.setLocalDescription(offer);
+    const pc = setupCallPeerConnection(targetId, "Peer"); //
+    attachLocalTracksToCall(pc); //
 
   socket.emit('call-offer', { targetId, offer });
 
   renderUserList();
 }
 
-socket.on('incoming-call', async ({ from, name, offer }) => {
-  if (!state.localStream) {
-    await startLocalMedia();
-  }
-
-  const pc = new RTCPeerConnection(iceConfig);
-  callPeers[from] = { pc, name };
-
-  pc.onicecandidate = (e) => {
-    if (e.candidate) {
-      socket.emit('call-ice', {
-        targetId: from,
-        candidate: e.candidate
-      });
+/**
+ * Handle an incoming call offer from another peer.
+ * Called when the server relays a call-offer.
+ * Signaling direction: [VIEWER] -> (call-offer) -> [SERVER] -> [HOST]
+ * PeerConnection impact: sets remote description, creates answer.
+ */
+async function handleIncomingCall({ from, name, offer }) {
+    if (!localStream) {
+        await startLocalMedia(); //
     }
   };
 
-  pc.ontrack = (e) => addRemoteVideo(from, e.streams[0]);
-
-  await pc.setRemoteDescription(new RTCSessionDescription(offer));
+    const pc = setupCallPeerConnection(from, name); //
 
   state.localStream.getTracks().forEach((t) => pc.addTrack(t, state.localStream));
 
-  const answer = await pc.createAnswer();
-  await pc.setLocalDescription(answer);
+    attachLocalTracksToCall(pc); //
 
   socket.emit('call-answer', { targetId: from, answer });
 
-  renderUserList();
-});
+    socket.emit('call-answer', { targetId: from, answer }); //
 
-socket.on('call-answer', async ({ from, answer }) => {
-  if (callPeers[from]) {
-    await callPeers[from].pc.setRemoteDescription(new RTCSessionDescription(answer));
-  }
-});
+    renderUserList(); //
+}
 
-socket.on('call-ice', ({ from, candidate }) => {
-  if (callPeers[from]) {
-    callPeers[from].pc.addIceCandidate(new RTCIceCandidate(candidate));
-  }
-});
+socket.on('incoming-call', handleIncomingCall);
 
-socket.on('call-end', ({ from }) => {
-  endPeerCall(from, true);
-});
+/**
+ * Apply a call answer to an existing PeerConnection.
+ * Called when the server relays call-answer to the offerer.
+ */
+async function handleCallAnswer({ from, answer }) {
+    if (callPeers[from]) {
+        await callPeers[from].pc.setRemoteDescription(
+            new RTCSessionDescription(answer)
+        ); //
+    }
+}
+
+socket.on('call-answer', handleCallAnswer);
+
+/**
+ * Handle incoming ICE candidates for a call PeerConnection.
+ * Signaling direction: [HOST|VIEWER] -> (call-ice) -> [SERVER] -> [PEER]
+ */
+function handleCallIce({ from, candidate }) {
+    if (callPeers[from]) {
+        callPeers[from].pc.addIceCandidate(new RTCIceCandidate(candidate)); //
+    }
+}
+
+socket.on('call-ice', handleCallIce);
+
+/**
+ * Handle a call end signal from the remote peer.
+ * Signaling direction: [HOST|VIEWER] -> (call-end) -> [SERVER] -> [PEER]
+ */
+function handleCallEnd({ from }) {
+    endPeerCall(from, true); //
+}
+
+socket.on('call-end', handleCallEnd);
 
 function endPeerCall(id, isIncomingSignal) {
   if (callPeers[id]) {
@@ -935,13 +1053,31 @@ function endPeerCall(id, isIncomingSignal) {
 // ======================================================
 // 10. VIEWER CONNECTION & ARCADE PUSH (UPDATED: Bitrate Patch)
 // ======================================================
-async function connectViewer(targetId) {
-  if (viewerPeers[targetId]) return;
 
-  const pc = new RTCPeerConnection(iceConfig);
-  viewerPeers[targetId] = pc;
+/**
+ * Attach the mixed canvas stream + host audio to the viewer PeerConnection.
+ * Called when creating a viewer PeerConnection.
+ */
+function attachBroadcastTracks(pc) {
+    canvasStream.getTracks().forEach(t => pc.addTrack(t, canvasStream)); //
 
-  pc.createDataChannel('control');
+    if (localStream) {
+        const at = localStream.getAudioTracks()[0]; //
+        if (at) pc.addTrack(at, canvasStream); //
+    }
+}
+
+/**
+ * Create and wire the host->viewer broadcast PeerConnection.
+ * Called per viewer when streaming is active.
+ * Signaling direction: [HOST] -> (webrtc-ice-candidate) -> [SERVER] -> [VIEWER]
+ * PeerConnection impact: adds mixer tracks + configures ICE.
+ */
+function setupViewerPeerConnection(targetId) {
+    const pc = new RTCPeerConnection(iceConfig); //
+    viewerPeers[targetId] = pc; //
+
+    pc.createDataChannel("control"); //
 
   pc.onicecandidate = (e) => {
     if (e.candidate) {
@@ -952,36 +1088,60 @@ async function connectViewer(targetId) {
     }
   };
 
-  canvasStream.getTracks().forEach((t) => pc.addTrack(t, canvasStream));
-
-  if (state.localStream) {
-    const at = state.localStream.getAudioTracks()[0];
-    if (at) pc.addTrack(at, canvasStream);
-  }
+    attachBroadcastTracks(pc); //
 
   if (state.activeToolboxFile) {
     pushFileToPeer(pc, state.activeToolboxFile, null);
   }
 
-  const offer = await pc.createOffer();
-  await pc.setLocalDescription(offer);
+    return pc; //
+}
+
+/**
+ * Create and send a WebRTC offer to a viewer.
+ * Called when streaming starts or when a new viewer joins.
+ * Signaling direction: [HOST] -> (webrtc-offer) -> [SERVER] -> [VIEWER]
+ */
+async function connectViewer(targetId) {
+    if (viewerPeers[targetId]) return; //
+
+    const pc = setupViewerPeerConnection(targetId); //
+
+    const offer = await pc.createOffer(); //
+    await pc.setLocalDescription(offer); //
 
   await applyBitrateConstraints(pc);
 
   socket.emit('webrtc-offer', { targetId, sdp: offer });
 }
 
-socket.on('webrtc-answer', async ({ from, sdp }) => {
-  if (viewerPeers[from]) {
-    await viewerPeers[from].setRemoteDescription(new RTCSessionDescription(sdp));
-  }
-});
+/**
+ * Handle the viewer's answer to a broadcast offer.
+ * Called when the server relays webrtc-answer.
+ */
+async function handleViewerAnswer({ from, sdp }) {
+    if (viewerPeers[from]) {
+        await viewerPeers[from].setRemoteDescription(
+            new RTCSessionDescription(sdp)
+        ); //
+    }
+}
 
-socket.on('webrtc-ice-candidate', async ({ from, candidate }) => {
-  if (viewerPeers[from]) {
-    await viewerPeers[from].addIceCandidate(new RTCIceCandidate(candidate));
-  }
-});
+socket.on('webrtc-answer', handleViewerAnswer);
+
+/**
+ * Handle ICE candidates from a viewer.
+ * Called when the server relays webrtc-ice-candidate.
+ */
+async function handleViewerIceCandidate({ from, candidate }) {
+    if (viewerPeers[from]) {
+        await viewerPeers[from].addIceCandidate(
+            new RTCIceCandidate(candidate)
+        ); //
+    }
+}
+
+socket.on('webrtc-ice-candidate', handleViewerIceCandidate);
 
 // ======================================================
 // 11. SOCKET & ROOM LOGIC
@@ -1593,3 +1753,19 @@ if (dom.openStreamBtn) {
     if (u) window.open(u, '_blank');
   };
 }
+
+// ======================================================
+// HELPER / GUIDE (Developer Notes)
+// ======================================================
+// - Signaling system:
+//   * Host & viewers join a socket.io room (join-room).
+//   * Host creates offers for broadcast or calls and sends them to the server.
+//   * The server relays offers/answers/ICE to the target socket id.
+// - Mixer + WebRTC:
+//   * The canvas mixer renders local + guest video into a single canvas.
+//   * The canvas is captured as a stream and sent to viewers.
+//   * Host audio is added as a track on the same PeerConnection.
+// - Extending overlays in the future:
+//   * Render new overlay layers into the canvas before drawImage().
+//   * Keep the canvas size/aspect consistent to avoid layout shifts.
+//   * If adding new stats/graphics, re-render when room-update or chat updates.
