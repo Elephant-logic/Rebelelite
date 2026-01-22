@@ -34,7 +34,8 @@ const state = {
   callPc: null,
   localCallStream: null,
   statsInterval: null,
-  joined: false
+  joined: false,
+  roomPrivacy: 'public'
 };
 
 // ======================================================
@@ -455,6 +456,27 @@ function sendChat() {
   input.value = '';
 }
 
+function emitWithAck(eventName, payload) {
+  return new Promise((resolve) => {
+    socket.emit(eventName, payload, resolve);
+  });
+}
+
+async function hydrateRoomInfo(roomName) {
+  if (!socket.connected) socket.connect();
+  const info = await emitWithAck('get-room-info', { roomName });
+  if (info?.privacy) {
+    state.roomPrivacy = info.privacy;
+  }
+  const vipLabel = $('viewerVipLabel');
+  if (vipLabel) {
+    vipLabel.textContent =
+      state.roomPrivacy === 'private'
+        ? 'VIP Code (required for private rooms)'
+        : 'VIP Code (optional)';
+  }
+}
+
 window.addEventListener('load', () => {
   const params = new URLSearchParams(window.location.search);
   const room = params.get('room') || 'lobby';
@@ -478,6 +500,8 @@ window.addEventListener('load', () => {
   const joinBtn = $('joinRoomBtn');
   const joinStatus = $('joinStatus');
   let activeVipToken = vipTokenParam ? vipTokenParam.trim() : '';
+
+  const roomInfoPromise = hydrateRoomInfo(room);
 
   const completeJoin = (vipToken) => {
     const codeValue = vipToken ? '' : vipInput?.value.trim();
@@ -503,7 +527,8 @@ window.addEventListener('load', () => {
     );
   };
 
-  const attemptJoin = () => {
+  const attemptJoin = async () => {
+    await roomInfoPromise;
     const chosenName = (nameInput?.value || state.myName || '').trim();
     if (!chosenName) {
       if (joinStatus) joinStatus.textContent = 'Please enter a display name.';
@@ -519,17 +544,8 @@ window.addEventListener('load', () => {
     }
 
     const code = vipInput?.value.trim();
-    if (code) {
-      if (!socket.connected) socket.connect();
-      socket.emit('redeem-vip-code', { code, desiredName: state.myName }, (resp) => {
-        if (resp?.ok && resp?.roomName) {
-          state.currentRoom = resp.roomName;
-          activeVipToken = resp.vipToken || '';
-          completeJoin(activeVipToken);
-        } else {
-          if (joinStatus) joinStatus.textContent = 'Invalid or expired VIP code.';
-        }
-      });
+    if (state.roomPrivacy === 'private' && !code) {
+      if (joinStatus) joinStatus.textContent = 'VIP code required for this room.';
       return;
     }
 
