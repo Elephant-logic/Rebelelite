@@ -1,3 +1,4 @@
+const fs = require('fs');
 const path = require('path');
 const express = require('express');
 const http = require('http');
@@ -24,27 +25,111 @@ app.use(express.static(path.join(__dirname, 'public')));
 
 // In-memory room state (per room: owner, lock state, users)
 const rooms = Object.create(null);
-const roomDirectory = new Map();
+const DATA_DIR = path.join(__dirname, 'data');
+const ROOMS_FILE = path.join(DATA_DIR, 'rooms.json');
+const DEFAULT_ROOMS_STORE = { rooms: {} };
+let roomsStore = loadRoomsStore();
+let roomsWritePromise = Promise.resolve();
 
 function normalizeRoomName(roomName) {
   if (!roomName || typeof roomName !== 'string') return '';
   return roomName.trim().slice(0, 50);
 }
 
-function getRoomDirectoryEntry(roomName) {
+function ensureRoomsFile() {
+  if (!fs.existsSync(DATA_DIR)) {
+    fs.mkdirSync(DATA_DIR, { recursive: true });
+  }
+  if (!fs.existsSync(ROOMS_FILE)) {
+    fs.writeFileSync(ROOMS_FILE, JSON.stringify(DEFAULT_ROOMS_STORE, null, 2));
+  }
+}
+
+function loadRoomsStore() {
+  ensureRoomsFile();
+  try {
+    const raw = fs.readFileSync(ROOMS_FILE, 'utf8');
+    if (!raw.trim()) return { rooms: {} };
+    const parsed = JSON.parse(raw);
+    if (!parsed || typeof parsed !== 'object' || typeof parsed.rooms !== 'object') {
+      fs.writeFileSync(ROOMS_FILE, JSON.stringify(DEFAULT_ROOMS_STORE, null, 2));
+      return { rooms: {} };
+    }
+    return parsed;
+  } catch (error) {
+    fs.writeFileSync(ROOMS_FILE, JSON.stringify(DEFAULT_ROOMS_STORE, null, 2));
+    return { rooms: {} };
+  }
+}
+
+function queueRoomsWrite() {
+  const payload = JSON.stringify(roomsStore, null, 2);
+  const writeTask = roomsWritePromise.then(() => fs.promises.writeFile(ROOMS_FILE, payload));
+  roomsWritePromise = writeTask.catch(() => {});
+  return writeTask;
+}
+
+function getStoredRoom(roomName) {
   const name = normalizeRoomName(roomName);
   if (!name) return null;
-  if (!roomDirectory.has(name)) {
-    roomDirectory.set(name, {
-      name,
-      ownerPassword: null,
-      public: true,
-      live: false,
-      viewers: 0,
-      title: null
-    });
+  return roomsStore.rooms[name] || null;
+}
+
+function listPublicRooms() {
+  return Object.values(roomsStore.rooms)
+    .filter((room) => room.privacy === 'public')
+    .map((room) => ({
+      name: room.name,
+      viewers: typeof room.viewers === 'number' ? room.viewers : 0,
+      title: room.title || null,
+      live: !!room.live
+    }));
+}
+
+async function createStoredRoom({ name, password, privacy, owner }) {
+  const roomName = normalizeRoomName(name);
+  if (!roomName) return { ok: false, error: 'Invalid room name.' };
+  if (roomsStore.rooms[roomName]) {
+    return { ok: false, error: 'Room already claimed.' };
   }
-  return roomDirectory.get(name);
+  const record = {
+    name: roomName,
+    password: String(password || ''),
+    privacy: privacy === 'private' ? 'private' : 'public',
+    owner: owner || null,
+    created: new Date().toISOString(),
+    live: false,
+    viewers: 0,
+    title: null
+  };
+  roomsStore.rooms[roomName] = record;
+  try {
+    await queueRoomsWrite();
+    return { ok: true, room: record };
+  } catch (error) {
+    delete roomsStore.rooms[roomName];
+    return { ok: false, error: 'Unable to save room.' };
+  }
+}
+
+async function updateStoredRoom(roomName, updater) {
+  const name = normalizeRoomName(roomName);
+  if (!name) return { ok: false, error: 'Invalid room name.' };
+  const existing = roomsStore.rooms[name];
+  if (!existing) return { ok: false, error: 'Room not found.' };
+  const previous = { ...existing };
+  updater(existing);
+  try {
+    await queueRoomsWrite();
+    return { ok: true, room: existing };
+  } catch (error) {
+    roomsStore.rooms[name] = previous;
+    return { ok: false, error: 'Unable to save room.' };
+  }
+}
+
+function getRoomDirectoryEntry(roomName) {
+  return getStoredRoom(roomName);
 }
 
 function getRoomInfo(roomName) {
@@ -97,6 +182,88 @@ io.on('connection', (socket) => {
   socket.data.room = null;
   socket.data.name = null;
 
+  socket.on('get-public-rooms', () => {
+    socket.emit('public-rooms', listPublicRooms());
+  });
+
+  socket.on('list-public-rooms', () => {
+    socket.emit('public-rooms', listPublicRooms());
+  });
+
+  socket.on('claim-room', async ({ name, password, public: isPublic } = {}, callback) => {
+    const reply = typeof callback === 'function' ? callback : () => {};
+    if (!name || !password) {
+      reply({ ok: false, error: 'Room name and password are required.' });
+      return;
+    }
+    const result = await createStoredRoom({
+      name,
+      password,
+      privacy: isPublic ? 'public' : 'private',
+      owner: socket.id
+    });
+    reply(result.ok ? { ok: true } : { ok: false, error: result.error });
+  });
+
+  socket.on('auth-host-room', ({ name, password } = {}, callback) => {
+    const reply = typeof callback === 'function' ? callback : () => {};
+    const record = getStoredRoom(name);
+    if (!record) {
+      reply({ ok: false, error: 'Room not found.' });
+      return;
+    }
+    if (record.password !== String(password || '')) {
+      reply({ ok: false, error: 'Invalid room password.' });
+      return;
+    }
+    reply({ ok: true });
+  });
+
+  socket.on('host-login', ({ name, password } = {}, callback) => {
+    const reply = typeof callback === 'function' ? callback : () => {};
+    const record = getStoredRoom(name);
+    if (!record) {
+      reply({ ok: false, error: 'Room not found.' });
+      return;
+    }
+    if (record.password !== String(password || '')) {
+      reply({ ok: false, error: 'Invalid room password.' });
+      return;
+    }
+    reply({ ok: true });
+  });
+
+  socket.on('update-room-privacy', async ({ name, privacy } = {}, callback) => {
+    const reply = typeof callback === 'function' ? callback : () => {};
+    if (!name || !privacy) {
+      reply({ ok: false, error: 'Room name and privacy are required.' });
+      return;
+    }
+    const normalizedPrivacy = privacy === 'private' ? 'private' : 'public';
+    const result = await updateStoredRoom(name, (room) => {
+      room.privacy = normalizedPrivacy;
+    });
+    reply(result.ok ? { ok: true } : { ok: false, error: result.error });
+  });
+
+  socket.on('update-room-live', async ({ name, live, viewers, title } = {}, callback) => {
+    const reply = typeof callback === 'function' ? callback : () => {};
+    if (!name) {
+      reply({ ok: false, error: 'Room name is required.' });
+      return;
+    }
+    const result = await updateStoredRoom(name, (room) => {
+      if (typeof live === 'boolean') room.live = live;
+      if (typeof viewers === 'number' && Number.isFinite(viewers)) {
+        room.viewers = Math.max(0, Math.floor(viewers));
+      }
+      if (typeof title === 'string') {
+        room.title = title.slice(0, 100) || null;
+      }
+    });
+    reply(result.ok ? { ok: true } : { ok: false, error: result.error });
+  });
+
   // ======================================================
   // ROOM JOIN + ROLE ASSIGNMENT
   // ======================================================
@@ -113,7 +280,9 @@ io.on('connection', (socket) => {
     const info = getRoomInfo(roomName);
     const directoryEntry = getRoomDirectoryEntry(roomName);
     if (directoryEntry && !directoryEntry.title) {
-      directoryEntry.title = info.streamTitle;
+      updateStoredRoom(roomName, (storedRoom) => {
+        storedRoom.title = info.streamTitle;
+      });
     }
 
     if (info.locked && info.ownerId && info.ownerId !== socket.id) {
@@ -200,7 +369,9 @@ io.on('connection', (socket) => {
     info.streamTitle = (title || 'Untitled Stream').slice(0, 100);
     const directoryEntry = getRoomDirectoryEntry(roomName);
     if (directoryEntry) {
-      directoryEntry.title = info.streamTitle;
+      updateStoredRoom(roomName, (storedRoom) => {
+        storedRoom.title = info.streamTitle;
+      });
     }
     broadcastRoomUpdate(roomName);
   });
@@ -304,13 +475,17 @@ io.on('connection', (socket) => {
     info.users.delete(socket.id);
     const directoryEntry = getRoomDirectoryEntry(roomName);
     if (directoryEntry && socket.data.isViewer) {
-      directoryEntry.viewers = Math.max(0, directoryEntry.viewers - 1);
+      updateStoredRoom(roomName, (storedRoom) => {
+        storedRoom.viewers = Math.max(0, (storedRoom.viewers || 0) - 1);
+      });
     }
 
     if (info.ownerId === socket.id) {
       info.ownerId = null;
       if (directoryEntry) {
-        directoryEntry.live = false;
+        updateStoredRoom(roomName, (storedRoom) => {
+          storedRoom.live = false;
+        });
       }
     }
 
