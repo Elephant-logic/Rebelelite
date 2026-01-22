@@ -176,7 +176,7 @@ const dom = {
 };
 
 // ======================================================
-// 3. CANVAS MIXER ENGINE (UPDATED: CPU Optimization)
+// CANVAS MIXER MODULE (CAMERA -> CANVAS -> CAPTURESTREAM)
 // ======================================================
 let canvas = document.createElement('canvas');
 canvas.width = 1920;
@@ -1063,7 +1063,7 @@ function attachBroadcastTracks(pc) {
 
     if (localStream) {
         const at = localStream.getAudioTracks()[0]; //
-        if (at) pc.addTrack(at, canvasStream); //
+        if (at) pc.addTrack(at, mixedStream); //
     }
 }
 
