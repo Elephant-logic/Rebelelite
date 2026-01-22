@@ -625,6 +625,33 @@ async function testPrivateVipLogic() {
     throw new Error('Private room allowed viewer without VIP code');
   }
 
+  const vipInput = doc.getElementById('vipUserInput');
+  const addVipBtn = doc.getElementById('addVipUserBtn');
+  if (!vipInput || !addVipBtn) {
+    throw new Error('VIP username controls missing in studio');
+  }
+
+  vipInput.value = 'ListVip';
+  vipInput.dispatchEvent(new Event('input', { bubbles: true }));
+  addVipBtn.click();
+
+  const vipNameJoin = await joinViewerSocket({
+    roomName: context.roomName,
+    name: 'ListVip'
+  });
+  if (!vipNameJoin?.ok || !vipNameJoin?.isVip) {
+    throw new Error(vipNameJoin?.error || 'VIP username did not grant access');
+  }
+
+  const invalidCodeJoin = await joinViewerSocket({
+    roomName: context.roomName,
+    name: 'InvalidVip',
+    vipCode: 'BADCODE'
+  });
+  if (invalidCodeJoin?.ok) {
+    throw new Error('Private room allowed invalid VIP code');
+  }
+
   return 'Private/VIP rules enforced for public, private, and VIP-required states.';
 }
 
