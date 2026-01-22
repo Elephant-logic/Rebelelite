@@ -1,177 +1,212 @@
+// ======================================================
+// SIGNALING MAP (Current Behavior - No Changes)
+// ======================================================
+// [HOST]  -> (join-room)        -> [SERVER]
+// [VIEWER]-> (join-room)        -> [SERVER]
+// [HOST]  -> (webrtc-offer)     -> [SERVER] -> [VIEWER]
+// [VIEWER]-> (webrtc-answer)    -> [SERVER] -> [HOST]
+// [HOST]  -> (ice-candidate)    -> [SERVER] -> [VIEWER]
+// [VIEWER]-> (ice-candidate)    -> [SERVER] -> [HOST]
+
+// ======================================================
+// WEBRTC HANDSHAKE FLOW (Viewer Perspective - Existing Order)
+// ======================================================
+// 1) Viewer joins room.
+// 2) Host creates and sends offer (relayed by server).
+// 3) Viewer sets remote description.
+// 4) Viewer creates answer and sends it back.
+// 5) ICE candidates exchanged both directions.
+// 6) PeerConnection connects and stream is displayed.
+
 const $ = id => document.getElementById(id);
 const socket = io({ autoConnect: false });
 
 // ICE config (uses ICE_SERVERS from ice.js if present, else Google STUN)
-const iceConfig = (typeof ICE_SERVERS !== "undefined" && Array.isArray(ICE_SERVERS) && ICE_SERVERS.length)
-    ? { iceServers: ICE_SERVERS }
-    : { iceServers: [{ urls: "stun:stun.l.google.com:19302" }] };
+const iceConfig = (typeof ICE_SERVERS !== 'undefined' && Array.isArray(ICE_SERVERS) && ICE_SERVERS.length)
+  ? { iceServers: ICE_SERVERS }
+  : { iceServers: [{ urls: 'stun:stun.l.google.com:19302' }] };
 
-let pc = null;               // broadcast stream PC (host → viewer)
-let hostId = null;           // socket id of the host sending us the stream
-let currentRoom = null;
-let myName = "Viewer-" + Math.floor(Math.random() * 1000);
-
-// separate PC for 1-to-1 “on-stage” call
-let callPc = null;
-let localCallStream = null;
+const state = {
+  pc: null,
+  hostId: null,
+  currentRoom: null,
+  myName: `Viewer-${Math.floor(Math.random() * 1000)}`,
+  callPc: null,
+  localCallStream: null,
+  statsInterval: null
+};
 
 // ======================================================
-// NEW: REAL-TIME HEALTH REPORTING (Professional Patch)
+// REAL-TIME HEALTH REPORTING (Professional Patch)
 // ======================================================
-let statsInterval = null;
-
 function startStatsReporting(peer) {
-    if (statsInterval) clearInterval(statsInterval);
-    statsInterval = setInterval(async () => {
-        if (!peer || peer.connectionState !== 'connected') return;
+  if (state.statsInterval) clearInterval(state.statsInterval);
+  state.statsInterval = setInterval(async () => {
+    if (!peer || peer.connectionState !== 'connected') return;
 
-        const stats = await peer.getStats();
-        stats.forEach(report => {
-            if (report.type === 'inbound-rtp' && report.kind === 'video') {
-                // Calculate latency based on jitter buffer delay
-                const latency = Math.round((report.jitterBufferDelay / report.jitterBufferEmittedCount) * 1000) || 0;
-                
-                // Update the Latency Badge in view.html
-                const badge = $('latencyBadge');
-                const mirror = $('viewerStatusMirror');
-                if (badge) {
-                    badge.innerHTML = `⏱️ ${latency}ms`;
-                    badge.style.display = 'inline-block';
-                    badge.style.color = latency > 200 ? '#ff4b6a' : '#9ba3c0';
-                }
-                if (mirror) mirror.innerHTML = `${latency}ms`;
+    const stats = await peer.getStats();
+    stats.forEach((report) => {
+      if (report.type === 'inbound-rtp' && report.kind === 'video') {
+        const latency = Math.round((report.jitterBufferDelay / report.jitterBufferEmittedCount) * 1000) || 0;
 
-                // Send latency back to the host via the server stats listener
-                socket.emit('report-stats', { latency });
-            }
-        });
-    }, 2000);
+        const badge = $('latencyBadge');
+        const mirror = $('viewerStatusMirror');
+        if (badge) {
+          badge.innerHTML = `⏱️ ${latency}ms`;
+          badge.style.display = 'inline-block';
+          badge.style.color = latency > 200 ? '#ff4b6a' : '#9ba3c0';
+        }
+        if (mirror) mirror.innerHTML = `${latency}ms`;
+
+        socket.emit('report-stats', { latency });
+      }
+    });
+  }, 2000);
 }
 
 // ======================================================
 // 1. ARCADE RECEIVER (P2P game/tool file from host)
 // ======================================================
 function setupReceiver(pcInstance) {
-    pcInstance.ondatachannel = (e) => {
-        if (e.channel.label !== "side-load-pipe") return;
+  pcInstance.ondatachannel = (e) => {
+    if (e.channel.label !== 'side-load-pipe') return;
 
-        const chan = e.channel;
-        let chunks = [];
-        let meta = null;
-        let received = 0;
+    const chan = e.channel;
+    let chunks = [];
+    let meta = null;
+    let received = 0;
 
-        chan.onmessage = (evt) => {
-            if (!meta && typeof evt.data === "string") {
-                try {
-                    const parsed = JSON.parse(evt.data);
-                    if (parsed && parsed.type === "meta") {
-                        meta = parsed;
-                        received = 0;
-                        chunks = [];
-                        console.log("[Arcade] Receiving:", meta.name, meta.size);
-                        return;
-                    }
-                } catch (err) {
-                    console.warn("[Arcade] Bad meta", err);
-                }
-                return;
-            }
+    chan.onmessage = (evt) => {
+      if (!meta && typeof evt.data === 'string') {
+        try {
+          const parsed = JSON.parse(evt.data);
+          if (parsed && parsed.type === 'meta') {
+            meta = parsed;
+            received = 0;
+            chunks = [];
+            console.log('[Arcade] Receiving:', meta.name, meta.size);
+            return;
+          }
+        } catch (err) {
+          console.warn('[Arcade] Bad meta', err);
+        }
+        return;
+      }
 
-            if (!meta) return;
+      if (!meta) return;
 
-            chunks.push(evt.data);
-            received += evt.data.byteLength || evt.data.size || 0;
+      chunks.push(evt.data);
+      received += evt.data.byteLength || evt.data.size || 0;
 
-            if (received >= meta.size) {
-                const blob = new Blob(chunks, {
-                    type: meta.mime || "application/octet-stream"
-                });
-                const url = URL.createObjectURL(blob);
+      if (received >= meta.size) {
+        const blob = new Blob(chunks, {
+          type: meta.mime || 'application/octet-stream'
+        });
+        const url = URL.createObjectURL(blob);
 
-                const toolbox = $("toolboxContainer");
-                if (toolbox) {
-                    const card = document.createElement("div");
-                    card.className = "toolbox-card";
+        const toolbox = $('toolboxContainer');
+        if (toolbox) {
+          const card = document.createElement('div');
+          card.className = 'toolbox-card';
 
-                    const title = document.createElement("div");
-                    title.className = "toolbox-title";
-                    title.textContent = meta.name || "Tool";
+          const title = document.createElement('div');
+          title.className = 'toolbox-title';
+          title.textContent = meta.name || 'Tool';
 
-                    const actions = document.createElement("div");
-                    actions.className = "toolbox-actions";
+          const actions = document.createElement('div');
+          actions.className = 'toolbox-actions';
 
-                    const a = document.createElement("a");
-                    a.href = url;
-                    a.download = meta.name || "download.bin";
-                    a.className = "btn-ctrl pulse-primary"; // Added pulse-primary for high visibility
-                    a.textContent = "Download";
+          const a = document.createElement('a');
+          a.href = url;
+          a.download = meta.name || 'download.bin';
+          a.className = 'btn-ctrl pulse-primary';
+          a.textContent = 'Download';
 
-                    actions.appendChild(a);
-                    card.appendChild(title);
-                    card.appendChild(actions);
-                    toolbox.appendChild(card);
-                }
+          actions.appendChild(a);
+          card.appendChild(title);
+          card.appendChild(actions);
+          toolbox.appendChild(card);
+        }
 
-                console.log("[Arcade] Complete:", meta.name);
-                meta = null;
-                chunks = [];
-                received = 0;
-                chan.close();
-            }
-        };
+        console.log('[Arcade] Complete:', meta.name);
+        meta = null;
+        chunks = [];
+        received = 0;
+        chan.close();
+      }
     };
+  };
 }
 
 // ======================================================
 // 2. STREAM CONNECTION (host → viewer video)
 // ======================================================
-socket.on("connect", () => {
+/**
+ * Update the viewer status indicator.
+ * Called on socket connect/disconnect and when stream becomes live.
+ */
+function setViewerStatus(text, isLive) {
     const status = $("viewerStatus");
-    if (status) status.textContent = "CONNECTED";
-});
+    if (!status) return;
+    status.textContent = text;
+    status.classList.toggle('live', !!isLive);
+}
 
-socket.on("disconnect", () => {
-    const status = $("viewerStatus");
-    if (status) {
-        status.textContent = "OFFLINE";
-        status.classList.remove('live');
+/**
+ * Attach the remote stream to the viewer video element.
+ * Called when the broadcast PeerConnection receives a track.
+ */
+function attachViewerStream(stream) {
+    const v = $("viewerVideo");
+    if (!v) return;
+    if (v.srcObject !== stream) {
+        v.srcObject = stream;
+        v.play().catch(() => {});
     }
-});
+    setViewerStatus("LIVE", true);
+}
 
-socket.on("webrtc-offer", async ({ sdp, from }) => {
+/**
+ * Create and wire the broadcast PeerConnection (host -> viewer).
+ * Called when a webrtc-offer arrives.
+ * Signaling direction: [VIEWER] -> (webrtc-answer) -> [SERVER] -> [HOST]
+ */
+function createBroadcastPeerConnection() {
+    const nextPc = new RTCPeerConnection(iceConfig);
+    setupReceiver(nextPc);
+
+    nextPc.ontrack = (e) => {
+        attachViewerStream(e.streams[0]);
+    };
+
+    nextPc.onicecandidate = (e) => {
+        if (e.candidate && hostId) {
+            socket.emit("webrtc-ice-candidate", {
+                targetId: hostId,
+                candidate: e.candidate
+            });
+        }
+    };
+
+    return nextPc;
+}
+
+/**
+ * Handle an incoming broadcast offer from the host.
+ * Called when the server relays webrtc-offer.
+ */
+async function handleBroadcastOffer({ sdp, from }) {
     try {
         hostId = from;
 
-        if (pc) {
-            try { pc.close(); } catch (e) {}
-            pc = null;
-        }
+    if (state.pc) {
+      try {
+        state.pc.close();
+      } catch (e) {}
+      state.pc = null;
+    }
 
-        pc = new RTCPeerConnection(iceConfig);
-        setupReceiver(pc);
-
-        pc.ontrack = (e) => {
-            const v = $("viewerVideo");
-            if (!v) return;
-            if (v.srcObject !== e.streams[0]) {
-                v.srcObject = e.streams[0];
-                v.play().catch(() => {});
-            }
-            const status = $("viewerStatus");
-            if (status) {
-                status.textContent = "LIVE";
-                status.classList.add('live'); // Green indicator
-            }
-        };
-
-        pc.onicecandidate = (e) => {
-            if (e.candidate && hostId) {
-                socket.emit("webrtc-ice-candidate", {
-                    targetId: hostId,
-                    candidate: e.candidate
-                });
-            }
-        };
+        pc = createBroadcastPeerConnection();
 
         await pc.setRemoteDescription(new RTCSessionDescription(sdp));
         const answer = await pc.createAnswer();
@@ -181,50 +216,74 @@ socket.on("webrtc-offer", async ({ sdp, from }) => {
             targetId: hostId,
             sdp: answer
         });
+      }
+    };
 
         // NEW: Initiate stats polling
         startStatsReporting(pc);
-
     } catch (err) {
         console.error("[Viewer] webrtc-offer failed", err);
     }
-});
+}
 
-socket.on("webrtc-ice-candidate", async ({ candidate }) => {
+/**
+ * Handle incoming ICE candidates for the broadcast PeerConnection.
+ * Called when the server relays webrtc-ice-candidate.
+ */
+async function handleBroadcastIceCandidate({ candidate }) {
     if (!pc || !candidate) return;
     try {
         await pc.addIceCandidate(new RTCIceCandidate(candidate));
     } catch (err) {
         console.error("[Viewer] addIceCandidate failed", err);
     }
+}
+
+socket.on("connect", () => {
+    setViewerStatus("CONNECTED", false);
 });
+
+socket.on("disconnect", () => {
+    setViewerStatus("OFFLINE", false);
+});
+
+socket.on("webrtc-offer", handleBroadcastOffer);
+socket.on("webrtc-ice-candidate", handleBroadcastIceCandidate);
 
 // ======================================================
 // 3. ON-STAGE CALL (host ↔ viewer 1-to-1 call)
 // ======================================================
+/**
+ * Ensure we have a local cam/mic stream for stage calls.
+ * Called before creating a call offer or answer.
+ * PeerConnection impact: supplies local tracks for callPc.
+ */
 async function ensureLocalCallStream() {
-    if (
-        localCallStream &&
-        localCallStream.getTracks().some(t => t.readyState === "live")
-    ) {
-        return;
-    }
+  if (
+    state.localCallStream &&
+    state.localCallStream.getTracks().some((t) => t.readyState === 'live')
+  ) {
+    return;
+  }
 
-    // PATCH: Professional audio constraints for stage calls
-    localCallStream = await navigator.mediaDevices.getUserMedia({
-        audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true },
-        video: { width: { ideal: 1280 }, height: { ideal: 720 }, frameRate: { max: 30 } }
-    });
+  state.localCallStream = await navigator.mediaDevices.getUserMedia({
+    audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true },
+    video: { width: { ideal: 1280 }, height: { ideal: 720 }, frameRate: { max: 30 } }
+  });
 
-    const prev = $("selfCamPreview");
-    if (prev) {
-        prev.srcObject = localCallStream;
-        prev.muted = true;
-        prev.play().catch(() => {});
-    }
+  const prev = $('selfCamPreview');
+  if (prev) {
+    prev.srcObject = state.localCallStream;
+    prev.muted = true;
+    prev.play().catch(() => {});
+  }
 }
 
-socket.on("ring-alert", async ({ from, fromId }) => {
+/**
+ * Handle host ring to bring viewer on stage.
+ * Signaling direction: [HOST] -> (ring-user) -> [SERVER] -> [VIEWER]
+ */
+async function handleRingAlert({ from, fromId }) {
     const ok = confirm(
         `Host ${from} wants to bring you on stage.\n\nAllow camera & mic?`
     );
@@ -237,8 +296,40 @@ socket.on("ring-alert", async ({ from, fromId }) => {
         console.error("[Viewer] stage call failed", err);
         alert("Could not access your camera/mic. Check permissions and try again.");
     }
-});
+}
 
+socket.on("ring-alert", handleRingAlert);
+
+/**
+ * Create and wire the viewer's call PeerConnection.
+ * Called when accepting a ring or when restarting a call.
+ * Signaling direction: [VIEWER] -> (call-offer) -> [SERVER] -> [HOST]
+ */
+function createCallPeerConnection() {
+    const pc2 = new RTCPeerConnection(iceConfig);
+    callPc = pc2;
+
+    pc2.onicecandidate = (e) => {
+        if (e.candidate) {
+            socket.emit("call-ice", {
+                targetId: hostId,
+                candidate: e.candidate
+            });
+        }
+    };
+
+  pc2.ontrack = (e) => {
+    console.log('[Viewer] host call track', e.streams[0]);
+  };
+
+    localCallStream.getTracks().forEach(t => pc2.addTrack(t, localCallStream));
+    return pc2;
+}
+
+/**
+ * Start a call offer toward the host.
+ * Called after the host rings the viewer.
+ */
 async function startCallToHost(targetId) {
     if (!targetId) return;
 
@@ -249,206 +340,220 @@ async function startCallToHost(targetId) {
         callPc = null;
     }
 
-    const pc2 = new RTCPeerConnection(iceConfig);
-    callPc = pc2;
+    hostId = targetId;
+    const pc2 = createCallPeerConnection();
 
-    pc2.onicecandidate = (e) => {
-        if (e.candidate) {
-            socket.emit("call-ice", {
-                targetId,
-                candidate: e.candidate
-            });
-        }
-    };
-
-    pc2.ontrack = (e) => {
-        console.log("[Viewer] host call track", e.streams[0]);
-    };
-
-    localCallStream.getTracks().forEach(t => pc2.addTrack(t, localCallStream));
-
-    const offer = await pc2.createOffer();
-    await pc2.setLocalDescription(offer);
+  const offer = await pc2.createOffer();
+  await pc2.setLocalDescription(offer);
 
     socket.emit("call-offer", {
-        targetId,
+        targetId: hostId,
         offer
     });
 }
 
-socket.on("call-answer", async ({ from, answer }) => {
+/**
+ * Apply the host's answer to the viewer call offer.
+ * Called when the server relays call-answer.
+ */
+async function handleCallAnswer({ from, answer }) {
     if (!callPc || !answer) return;
     try {
         await callPc.setRemoteDescription(new RTCSessionDescription(answer));
     } catch (err) {
         console.error("[Viewer] remote answer failed", err);
     }
-});
+}
 
-socket.on("call-ice", async ({ from, candidate }) => {
+/**
+ * Handle ICE candidates for the on-stage call.
+ * Signaling direction: [HOST] -> (call-ice) -> [SERVER] -> [VIEWER]
+ */
+async function handleCallIce({ from, candidate }) {
     if (!callPc || !candidate) return;
     try {
         await callPc.addIceCandidate(new RTCIceCandidate(candidate));
     } catch (err) {
         console.error("[Viewer] call ICE failed", err);
     }
-});
+}
 
-socket.on("call-end", ({ from }) => {
+/**
+ * End the on-stage call from host instruction.
+ * Signaling direction: [HOST] -> (call-end) -> [SERVER] -> [VIEWER]
+ */
+function handleCallEnd({ from }) {
     if (callPc) {
         try { callPc.close(); } catch (e) {}
         callPc = null;
     }
-});
+}
+
+socket.on("call-answer", handleCallAnswer);
+socket.on("call-ice", handleCallIce);
+socket.on("call-end", handleCallEnd);
 
 // ======================================================
 // 4. CHAT + SYSTEM MESSAGES
 // ======================================================
 function appendChat(name, text) {
-    const log = $("chatLog");
-    if (!log) return;
+  const log = $('chatLog');
+  if (!log) return;
 
-    const div = document.createElement("div");
-    div.className = "chat-line";
+  const div = document.createElement('div');
+  div.className = 'chat-line';
 
-    const strong = document.createElement("strong");
-    strong.textContent = name;
+  const strong = document.createElement('strong');
+  strong.textContent = name;
 
-    const span = document.createElement("span");
-    span.textContent = `: ${text}`;
+  const span = document.createElement('span');
+  span.textContent = `: ${text}`;
 
-    div.appendChild(strong);
-    div.appendChild(span);
-    log.appendChild(div);
-    log.scrollTop = log.scrollHeight;
+  div.appendChild(strong);
+  div.appendChild(span);
+  log.appendChild(div);
+  log.scrollTop = log.scrollHeight;
 }
 
-socket.on("public-chat", (d) => {
-    appendChat(d.name, d.text);
+socket.on('public-chat', (d) => {
+  appendChat(d.name, d.text);
 });
 
-socket.on("kicked", () => {
-    alert("You have been kicked from the room by the host.");
-    window.location.href = "index.html";
+socket.on('kicked', () => {
+  alert('You have been kicked from the room by the host.');
+  window.location.href = 'index.html';
 });
 
-socket.on("room-error", (err) => {
-    alert(err || "Room error");
-    window.location.href = "index.html";
+socket.on('room-error', (err) => {
+  alert(err || 'Room error');
+  window.location.href = 'index.html';
 });
 
 // ======================================================
 // 5. UI WIRING (join room, chat, mute, fullscreen, etc.)
 // ======================================================
 function sendChat() {
-    const input = $("chatInput");
-    if (!input || !currentRoom) return;
+  const input = $('chatInput');
+  if (!input || !state.currentRoom) return;
 
-    const text = input.value.trim();
-    if (!text) return;
+  const text = input.value.trim();
+  if (!text) return;
 
-    socket.emit("public-chat", {
-        room: currentRoom,
-        name: myName,
-        text,
-        fromViewer: true
-    });
+  socket.emit('public-chat', {
+    room: state.currentRoom,
+    name: state.myName,
+    text,
+    fromViewer: true
+  });
 
-    input.value = "";
+  input.value = '';
 }
 
-window.addEventListener("load", () => {
-    const params = new URLSearchParams(window.location.search);
-    const room = params.get("room") || "lobby";
-    const nameParam = params.get("name");
+window.addEventListener('load', () => {
+  const params = new URLSearchParams(window.location.search);
+  const room = params.get('room') || 'lobby';
+  const nameParam = params.get('name');
 
-    if (nameParam && nameParam.trim()) {
-        myName = nameParam.trim().slice(0, 30);
-    } else {
-        const entered = prompt("Enter your display name:", myName);
-        if (entered && entered.trim()) {
-            myName = entered.trim().slice(0, 30);
-        }
+  if (nameParam && nameParam.trim()) {
+    state.myName = nameParam.trim().slice(0, 30);
+  } else {
+    const entered = prompt('Enter your display name:', state.myName);
+    if (entered && entered.trim()) {
+      state.myName = entered.trim().slice(0, 30);
     }
+  }
 
-    currentRoom = room;
+  state.currentRoom = room;
 
-    const nameLabel = $("viewerNameLabel");
-    if (nameLabel) nameLabel.textContent = myName;
+  const nameLabel = $('viewerNameLabel');
+  if (nameLabel) nameLabel.textContent = state.myName;
 
-    socket.connect();
-    socket.emit("join-room", {
-        room,
-        name: myName,
-        isViewer: true
-    });
+  socket.connect();
+  socket.emit('join-room', {
+    room,
+    name: state.myName,
+    isViewer: true
+  });
 
-    const sendBtn = $("sendBtn");
-    const chatInput = $("chatInput");
-    if (sendBtn && chatInput) {
-        sendBtn.onclick = sendChat;
-        chatInput.onkeydown = (e) => {
-            if (e.key === "Enter") sendChat();
-        };
-    }
+  const sendBtn = $('sendBtn');
+  const chatInput = $('chatInput');
+  if (sendBtn && chatInput) {
+    sendBtn.onclick = sendChat;
+    chatInput.onkeydown = (e) => {
+      if (e.key === 'Enter') sendChat();
+    };
+  }
 
-    const emojiStrip = $("emojiStrip");
-    if (emojiStrip && chatInput) {
-        emojiStrip.onclick = (e) => {
-            if (e.target.classList.contains("emoji")) {
-                chatInput.value += e.target.textContent;
-                chatInput.focus();
-            }
-        };
-    }
+  const emojiStrip = $('emojiStrip');
+  if (emojiStrip && chatInput) {
+    emojiStrip.onclick = (e) => {
+      if (e.target.classList.contains('emoji')) {
+        chatInput.value += e.target.textContent;
+        chatInput.focus();
+      }
+    };
+  }
 
-    const requestBtn = $("requestCallBtn");
-    if (requestBtn) {
-        requestBtn.onclick = () => {
-            socket.emit("request-to-call");
-            document.body.classList.add('hand-active'); // Visual patch
-            requestBtn.textContent = "Request Sent ✋";
-            requestBtn.disabled = true;
-        };
-    }
+  const requestBtn = $('requestCallBtn');
+  if (requestBtn) {
+    requestBtn.onclick = () => {
+      socket.emit('request-to-call');
+      document.body.classList.add('hand-active');
+      requestBtn.textContent = 'Request Sent ✋';
+      requestBtn.disabled = true;
+    };
+  }
 
-    const unmuteBtn = $("unmuteBtn");
-    if (unmuteBtn) {
-        unmuteBtn.onclick = () => {
-            const v = $("viewerVideo");
-            if (!v) return;
-            const willUnmute = v.muted;
+  const unmuteBtn = $('unmuteBtn');
+  if (unmuteBtn) {
+    unmuteBtn.onclick = () => {
+      const v = $('viewerVideo');
+      if (!v) return;
+      const willUnmute = v.muted;
 
-            v.muted = !v.muted;
-            v.volume = v.muted ? 0.0 : 1.0;
+      v.muted = !v.muted;
+      v.volume = v.muted ? 0.0 : 1.0;
 
-            if (willUnmute) {
-                v.play().catch(() => {});
-                unmuteBtn.textContent = "🔊 Mute";
-                unmuteBtn.classList.remove('pulse-primary'); // End guidance pulse
-            } else {
-                unmuteBtn.textContent = "🔇 Unmute";
-            }
-        };
-    }
+      if (willUnmute) {
+        v.play().catch(() => {});
+        unmuteBtn.textContent = '🔊 Mute';
+        unmuteBtn.classList.remove('pulse-primary');
+      } else {
+        unmuteBtn.textContent = '🔇 Unmute';
+      }
+    };
+  }
 
-    const fsBtn = $("fullscreenBtn");
-    if (fsBtn) {
-        fsBtn.onclick = () => {
-            const v = $("viewerVideo");
-            if (!v) return;
-            if (v.requestFullscreen) v.requestFullscreen();
-            else if (v.webkitRequestFullscreen) v.webkitRequestFullscreen();
-            else if (v.msRequestFullscreen) v.msRequestFullscreen();
-        };
-    }
+  const fsBtn = $('fullscreenBtn');
+  if (fsBtn) {
+    fsBtn.onclick = () => {
+      const v = $('viewerVideo');
+      if (!v) return;
+      if (v.requestFullscreen) v.requestFullscreen();
+      else if (v.webkitRequestFullscreen) v.webkitRequestFullscreen();
+      else if (v.msRequestFullscreen) v.msRequestFullscreen();
+    };
+  }
 
-    const toggleChatBtn = $("toggleChatBtn");
-    if (toggleChatBtn) {
-        toggleChatBtn.onclick = () => {
-            const box = $("chatBox");
-            if (!box) return;
-            box.classList.toggle("hidden");
-        };
-    }
+  const toggleChatBtn = $('toggleChatBtn');
+  if (toggleChatBtn) {
+    toggleChatBtn.onclick = () => {
+      const box = $('chatBox');
+      if (!box) return;
+      box.classList.toggle('hidden');
+    };
+  }
 });
+
+// ======================================================
+// HELPER / GUIDE (Developer Notes)
+// ======================================================
+// - Signaling system:
+//   * Viewer joins room, waits for host webrtc-offer.
+//   * Viewer answers and exchanges ICE via the server.
+// - Mixer + WebRTC:
+//   * Viewer receives a single mixed canvas stream from the host.
+//   * The mixer composition is controlled entirely in app.js.
+// - Adding overlays in the future:
+//   * Overlays should be drawn into the host mixer canvas.
+//   * Viewer only needs to display the incoming stream.
