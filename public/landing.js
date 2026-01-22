@@ -9,6 +9,8 @@ const claimRoomForm = $('claimRoomForm');
 const claimRoomStatus = $('claimRoomStatus');
 const hostRoomForm = $('hostRoomForm');
 const hostRoomStatus = $('hostRoomStatus');
+const vipCodeForm = $('vipCodeForm');
+const vipCodeStatus = $('vipCodeStatus');
 
 function setStatus(el, message, type) {
   if (!el) return;
@@ -105,12 +107,59 @@ if (hostRoomForm) {
       return;
     }
 
-    setStatus(hostRoomStatus, 'Checking room ownership...', '');
-    socket.emit('auth-host-room', { name, password }, response => {
-      if (response?.ok) {
+    setStatus(hostRoomStatus, 'Checking room status...', '');
+    socket.emit('check-room-claimed', { roomName: name }, claimedResp => {
+      if (!claimedResp?.claimed) {
         window.location.href = `/index.html?room=${encodeURIComponent(name)}&role=host`;
+        return;
+      }
+
+      if (claimedResp?.hasPassword && !password) {
+        setStatus(hostRoomStatus, 'Host password required for claimed rooms.', 'error');
+        return;
+      }
+
+      if (!claimedResp?.hasPassword) {
+        window.location.href = `/index.html?room=${encodeURIComponent(name)}&role=host`;
+        return;
+      }
+
+      setStatus(hostRoomStatus, 'Checking room ownership...', '');
+      socket.emit('auth-host-room', { roomName: name, password }, response => {
+        if (response?.ok) {
+          sessionStorage.setItem(`hostPassword:${name}`, password);
+          window.location.href = `/index.html?room=${encodeURIComponent(name)}&role=host&authed=1`;
+        } else {
+          setStatus(hostRoomStatus, response?.error || 'Unable to authenticate room.', 'error');
+        }
+      });
+    });
+  });
+}
+
+if (vipCodeForm) {
+  vipCodeForm.addEventListener('submit', event => {
+    event.preventDefault();
+    const code = $('vipCodeInput')?.value.trim();
+    const desiredName = $('vipDisplayNameInput')?.value.trim();
+
+    if (!code) {
+      setStatus(vipCodeStatus, 'VIP code is required.', 'error');
+      return;
+    }
+
+    setStatus(vipCodeStatus, 'Checking VIP code...', '');
+    socket.emit('redeem-vip-code', { code, desiredName }, response => {
+      if (response?.ok && response?.roomName) {
+        const params = new URLSearchParams({
+          room: response.roomName,
+          role: 'vip'
+        });
+        if (response.vipToken) params.set('vipToken', response.vipToken);
+        if (desiredName) params.set('name', desiredName);
+        window.location.href = `/view.html?${params.toString()}`;
       } else {
-        setStatus(hostRoomStatus, response?.error || 'Unable to authenticate room.', 'error');
+        setStatus(vipCodeStatus, 'Invalid or expired VIP code.', 'error');
       }
     });
   });

@@ -163,6 +163,7 @@ const dom = {
   addVipUserBtn: $('addVipUserBtn'),
   vipUserList: $('vipUserList'),
   generateVipCodeBtn: $('generateVipCodeBtn'),
+  vipCodeUses: $('vipCodeUses'),
   vipCodeList: $('vipCodeList'),
   vipStatus: $('vipStatus'),
   btnSendPublic: $('btnSendPublic'),
@@ -1243,20 +1244,71 @@ if (dom.joinBtn) {
     state.userName = nameInput && nameInput.value.trim() ? nameInput.value.trim() : 'Host';
 
     socket.connect();
-    socket.emit('join-room', { room, name: state.userName, isViewer: false }, (resp) => {
-      if (resp?.isHost) {
-        state.vipUsers = Array.isArray(resp.vipUsers) ? resp.vipUsers : [];
-        state.vipCodes = Array.isArray(resp.vipCodes) ? resp.vipCodes : [];
-        renderVipUsers();
-        renderVipCodes();
+    const joinAsHost = () => {
+      socket.emit('join-room', { room, name: state.userName, isViewer: false }, (resp) => {
+        if (resp?.isHost) {
+          state.vipUsers = Array.isArray(resp.vipUsers) ? resp.vipUsers : [];
+          state.vipCodes = Array.isArray(resp.vipCodes) ? resp.vipCodes : [];
+          renderVipUsers();
+          renderVipCodes();
+          socket.emit('get-vip-codes', { roomName: room }, (codesResp) => {
+            if (codesResp?.ok) {
+              state.vipCodes = Array.isArray(codesResp.codes) ? codesResp.codes : [];
+              renderVipCodes();
+            }
+          });
+        } else if (resp?.error) {
+          alert(resp.error);
+          return;
+        }
+      });
+
+      dom.joinBtn.disabled = true;
+      if (dom.leaveBtn) dom.leaveBtn.disabled = false;
+
+      updateLink(room);
+      startLocalMedia();
+    };
+
+    socket.emit('check-room-claimed', { roomName: room }, (claimedResp) => {
+      if (!claimedResp?.claimed) {
+        state.iAmHost = true;
+        state.wasHost = true;
+        joinAsHost();
+        return;
       }
+
+      const params = new URLSearchParams(window.location.search);
+      const authed = params.get('authed') === '1';
+      const cachedPassword = authed ? sessionStorage.getItem(`hostPassword:${room}`) : null;
+      const needsPassword = claimedResp?.hasPassword;
+      const password = needsPassword
+        ? cachedPassword || window.prompt('Enter host password for this room:') || ''
+        : '';
+
+      if (needsPassword && !password) {
+        alert('Host password is required to enter this room.');
+        return;
+      }
+
+      if (!needsPassword) {
+        state.iAmHost = true;
+        state.wasHost = true;
+        joinAsHost();
+        return;
+      }
+
+      socket.emit('auth-host-room', { roomName: room, password }, (authResp) => {
+        if (authResp?.ok) {
+          sessionStorage.setItem(`hostPassword:${room}`, password);
+          state.iAmHost = true;
+          state.wasHost = true;
+          joinAsHost();
+        } else {
+          alert(authResp?.error || 'Invalid password.');
+        }
+      });
     });
-
-    dom.joinBtn.disabled = true;
-    if (dom.leaveBtn) dom.leaveBtn.disabled = false;
-
-    updateLink(room);
-    startLocalMedia();
   };
 }
 
@@ -1479,11 +1531,16 @@ function renderVipUsers() {
 function renderVipCodes() {
   if (!dom.vipCodeList) return;
   dom.vipCodeList.innerHTML = '';
-  state.vipCodes.forEach((code) => {
+  state.vipCodes.forEach((entry) => {
     const tag = document.createElement('span');
     tag.style.cssText =
       'background:var(--accent); color:#000; padding:2px 6px; border-radius:4px; font-size:0.7rem;';
-    tag.textContent = code;
+    if (typeof entry === 'string') {
+      tag.textContent = entry;
+    } else {
+      const remaining = Math.max(0, (entry.maxUses || 0) - (entry.used || 0));
+      tag.textContent = `${entry.code} (${remaining}/${entry.maxUses})`;
+    }
     dom.vipCodeList.appendChild(tag);
   });
 }
@@ -1511,9 +1568,14 @@ if (dom.addVipUserBtn) {
 if (dom.generateVipCodeBtn) {
   dom.generateVipCodeBtn.onclick = () => {
     if (!state.currentRoom) return;
-    socket.emit('generate-vip-code', { room: state.currentRoom }, (resp) => {
+    const maxUses = dom.vipCodeUses ? Number(dom.vipCodeUses.value) : 1;
+    socket.emit('generate-vip-code', { room: state.currentRoom, maxUses }, (resp) => {
       if (resp?.ok && resp?.code) {
-        state.vipCodes.push(resp.code);
+        state.vipCodes.push({
+          code: resp.code,
+          maxUses: resp.maxUses || maxUses || 1,
+          used: 0
+        });
         renderVipCodes();
         setVipStatus('VIP code generated.');
       } else {
