@@ -1489,24 +1489,23 @@ function applyPrivacyState(isPrivate, { emitUpdate = true } = {}) {
     dom.publicRoomToggle.checked = !state.isPrivateMode;
   }
 
-    if (state.currentRoom) {
-      socket.emit('update-room-privacy', {
-        roomName: state.currentRoom,
-        privacy: state.isPrivateMode ? 'private' : 'public'
-      });
-    }
+  if (emitUpdate && state.currentRoom) {
+    socket.emit('update-room-privacy', {
+      roomName: state.currentRoom,
+      privacy: state.isPrivateMode ? 'private' : 'public'
+    });
+  }
 
-    if (state.isPrivateMode) {
-      state.latestUserList.forEach((u) => {
-        if (
-          u.id !== state.myId &&
-          !state.allowedGuests.some((g) => g.toLowerCase() === u.name.toLowerCase())
-        ) {
-          socket.emit('kick-user', u.id);
-        }
-      });
-    }
-  };
+  if (emitUpdate && state.isPrivateMode) {
+    state.latestUserList.forEach((u) => {
+      if (
+        u.id !== state.myId &&
+        !state.allowedGuests.some((g) => g.toLowerCase() === u.name.toLowerCase())
+      ) {
+        socket.emit('kick-user', u.id);
+      }
+    });
+  }
 }
 
 if (dom.addGuestBtn) {
