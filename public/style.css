@@ -42,7 +42,12 @@ input[type="text"] {
   width: 100%; background: var(--panel); border: 1px solid var(--border);
   color: #fff; padding: 12px; border-radius: var(--radius-sm); outline: none; transition: 0.2s; font-size: 1rem;
 }
+select.select-input {
+  width: 100%; background: var(--panel); border: 1px solid var(--border);
+  color: #fff; padding: 12px; border-radius: var(--radius-sm); outline: none; transition: 0.2s; font-size: 1rem;
+}
 input:focus { border-color: var(--accent); box-shadow: 0 0 0 2px rgba(74,243,163,0.1); }
+select.select-input:focus { border-color: var(--accent); box-shadow: 0 0 0 2px rgba(74,243,163,0.1); }
 
 /* Buttons */
 .btn {
@@ -136,6 +141,29 @@ input:focus { border-color: var(--accent); box-shadow: 0 0 0 2px rgba(74,243,163
 /* Logo */
 .logo-text { font-family: 'Courier New', monospace; font-weight: 800; letter-spacing: -2px; text-transform: uppercase; font-size: 1.4rem; color: #fff; margin: 0; }
 .logo-highlight { color: var(--accent); text-shadow: 0 0 15px rgba(74, 243, 163, 0.4); }
+
+/* Landing Page */
+.landing-shell { max-width: 1200px; }
+.landing-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 16px; margin-top: 16px; }
+.landing-card {
+  background: var(--panel); border: 1px solid var(--border); border-radius: var(--radius-lg);
+  padding: 18px; display: flex; flex-direction: column; gap: 10px;
+}
+.landing-card-header { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
+.landing-muted { color: var(--muted); font-size: 0.85rem; margin: 0; }
+.landing-empty { color: var(--muted); font-size: 0.8rem; margin: 0; }
+.rooms-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 12px; }
+.room-card {
+  background: var(--panel-soft); border: 1px solid var(--border); border-radius: var(--radius-sm);
+  padding: 12px; display: flex; flex-direction: column; gap: 8px;
+}
+.room-card h3 { font-size: 1rem; margin: 0; }
+.room-meta { font-size: 0.75rem; color: var(--muted); }
+.status-message { min-height: 18px; font-size: 0.8rem; color: var(--muted); }
+.status-message.ok { color: var(--accent); }
+.status-message.error { color: var(--danger); }
+.toggle-row { display: flex; align-items: center; gap: 8px; font-size: 0.8rem; color: var(--muted); }
+.toggle-row input[type="checkbox"] { accent-color: var(--accent); width: 16px; height: 16px; }
 
 /* PREVIEW POPUP STYLES */
 .preview-modal {

@@ -16,10 +16,36 @@ const io = new Server(server, {
   pingInterval: 25000
 });
 
+app.get('/', (req, res) => {
+  res.sendFile(path.join(__dirname, 'public', 'landing.html'));
+});
+
 app.use(express.static(path.join(__dirname, 'public')));
 
 // In-memory room state
 const rooms = Object.create(null);
+const roomDirectory = new Map();
+
+function normalizeRoomName(roomName) {
+  if (!roomName || typeof roomName !== 'string') return '';
+  return roomName.trim().slice(0, 50);
+}
+
+function getRoomDirectoryEntry(roomName) {
+  const name = normalizeRoomName(roomName);
+  if (!name) return null;
+  if (!roomDirectory.has(name)) {
+    roomDirectory.set(name, {
+      name,
+      ownerPassword: null,
+      public: true,
+      live: false,
+      viewers: 0,
+      title: null
+    });
+  }
+  return roomDirectory.get(name);
+}
 
 function getRoomInfo(roomName) {
   if (!rooms[roomName]) {
@@ -65,11 +91,15 @@ io.on('connection', (socket) => {
       return;
     }
 
-    const roomName = room.trim().slice(0, 50); 
+    const roomName = normalizeRoomName(room); 
     const rawName = (name && String(name).trim()) || `User-${socket.id.slice(0, 4)}`;
     const displayName = rawName.slice(0, 30); 
 
     const info = getRoomInfo(roomName);
+    const directoryEntry = getRoomDirectoryEntry(roomName);
+    if (directoryEntry && !directoryEntry.title) {
+      directoryEntry.title = info.streamTitle;
+    }
 
     if (info.locked && info.ownerId && info.ownerId !== socket.id) {
       socket.emit('room-error', 'Room is locked by host');
@@ -86,14 +116,20 @@ io.on('connection', (socket) => {
       info.ownerId = socket.id;
     }
 
+    socket.data.isHost = info.ownerId === socket.id;
+
     info.users.set(socket.id, { 
         name: displayName, 
         isViewer: !!isViewer,
         requestingCall: false 
     });
 
+    if (directoryEntry && socket.data.isViewer) {
+      directoryEntry.viewers = Math.max(0, directoryEntry.viewers + 1);
+    }
+
     socket.emit('role', { 
-      isHost: info.ownerId === socket.id,
+      isHost: socket.data.isHost,
       streamTitle: info.streamTitle
     });
 
@@ -125,9 +161,11 @@ io.on('connection', (socket) => {
     const info = rooms[roomName];
     if (info && info.ownerId === socket.id) {
         info.ownerId = targetId;
+        socket.data.isHost = false;
         socket.emit('role', { isHost: false });
         const nextSocket = io.sockets.sockets.get(targetId);
         if (nextSocket) {
+            nextSocket.data.isHost = true;
             nextSocket.emit('role', { isHost: true, streamTitle: info.streamTitle });
         }
         broadcastRoomUpdate(roomName);
@@ -149,7 +187,82 @@ io.on('connection', (socket) => {
     const info = rooms[roomName];
     if (!info || info.ownerId !== socket.id) return;
     info.streamTitle = (title || 'Untitled Stream').slice(0, 100);
+    const directoryEntry = getRoomDirectoryEntry(roomName);
+    if (directoryEntry) {
+      directoryEntry.title = info.streamTitle;
+    }
     broadcastRoomUpdate(roomName);
+  });
+
+  socket.on('claim-room', ({ name, password, public: isPublic }, callback) => {
+    const roomName = normalizeRoomName(name);
+    const ownerPassword = typeof password === 'string' ? password.trim() : '';
+    if (!roomName || !ownerPassword) {
+      callback?.({ ok: false, error: 'Room name and password are required.' });
+      return;
+    }
+
+    const entry = getRoomDirectoryEntry(roomName);
+    if (entry.ownerPassword) {
+      callback?.({ ok: false, error: 'Room already owned.' });
+      return;
+    }
+
+    // TODO: Insert checkout/payment verification here before reserving rooms.
+    entry.ownerPassword = ownerPassword;
+    entry.public = Boolean(isPublic);
+    entry.live = entry.live || false;
+    entry.viewers = entry.viewers || 0;
+    callback?.({ ok: true });
+  });
+
+  socket.on('auth-host-room', ({ name, password }, callback) => {
+    const roomName = normalizeRoomName(name);
+    if (!roomName) {
+      callback?.({ ok: false, error: 'Room name is required.' });
+      return;
+    }
+
+    const entry = getRoomDirectoryEntry(roomName);
+    if (entry.ownerPassword) {
+      if (entry.ownerPassword !== String(password || '')) {
+        callback?.({ ok: false, error: 'Incorrect room password.' });
+        return;
+      }
+    }
+    callback?.({ ok: true });
+  });
+
+  socket.on('get-public-rooms', () => {
+    const publicRooms = [];
+    for (const entry of roomDirectory.values()) {
+      if (entry.public && entry.live) {
+        publicRooms.push({
+          name: entry.name,
+          title: entry.title || '',
+          viewers: entry.viewers || 0
+        });
+      }
+    }
+    socket.emit('public-rooms', publicRooms);
+  });
+
+  socket.on('update-room-privacy', ({ room, public: isPublic }) => {
+    if (!socket.data.isHost) return;
+    const roomName = normalizeRoomName(room || socket.data.room);
+    if (!roomName) return;
+    const entry = getRoomDirectoryEntry(roomName);
+    if (!entry) return;
+    entry.public = Boolean(isPublic);
+  });
+
+  socket.on('update-room-live', ({ room, live }) => {
+    if (!socket.data.isHost) return;
+    const roomName = normalizeRoomName(room || socket.data.room);
+    if (!roomName) return;
+    const entry = getRoomDirectoryEntry(roomName);
+    if (!entry) return;
+    entry.live = Boolean(live);
   });
 
   socket.on('kick-user', (targetId) => {
@@ -234,9 +347,16 @@ io.on('connection', (socket) => {
     const info = rooms[roomName];
     if (!info) return;
     info.users.delete(socket.id);
+    const directoryEntry = getRoomDirectoryEntry(roomName);
+    if (directoryEntry && socket.data.isViewer) {
+      directoryEntry.viewers = Math.max(0, directoryEntry.viewers - 1);
+    }
 
     if (info.ownerId === socket.id) {
       info.ownerId = null;
+      if (directoryEntry) {
+        directoryEntry.live = false;
+      }
     }
 
     socket.to(roomName).emit('user-left', { id: socket.id });

@@ -754,6 +754,7 @@ async function handleStartStream() {
         startBtn.textContent = "Stop Stream"; //
         startBtn.classList.add('danger'); //
     }
+    socket.emit('update-room-live', { room: currentRoom, live: true }); //
 
     latestUserList.forEach(u => {
         if (u.id !== myId) {
@@ -773,6 +774,7 @@ if (startStreamBtn) {
             isStreaming = false; //
             startStreamBtn.textContent = "Start Stream"; //
             startStreamBtn.classList.remove('danger'); //
+            socket.emit('update-room-live', { room: currentRoom, live: false }); //
 
             Object.values(viewerPeers).forEach(pc => pc.close()); //
             for (const k in viewerPeers) {
@@ -1127,6 +1129,14 @@ socket.on('role', async ({ isHost }) => {
         hostControls.style.display = isHost ? 'block' : 'none'; //
     }
 
+    const publicRoomToggle = $('publicRoomToggle'); //
+    if (publicRoomToggle && isHost && currentRoom) {
+        socket.emit('update-room-privacy', {
+            room: currentRoom,
+            public: publicRoomToggle.checked
+        }); //
+    }
+
     renderUserList(); //
 });
 
@@ -1167,6 +1177,17 @@ if (updateSlugBtn) {
         if (!slugInput) return;
         const s = slugInput.value.trim(); //
         if (s) updateLink(s); //
+    };
+}
+
+const publicRoomToggle = $('publicRoomToggle'); //
+if (publicRoomToggle) {
+    publicRoomToggle.onchange = () => {
+        if (!iAmHost || !currentRoom) return;
+        socket.emit('update-room-privacy', {
+            room: currentRoom,
+            public: publicRoomToggle.checked
+        }); //
     };
 }
 
