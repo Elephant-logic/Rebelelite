@@ -460,6 +460,7 @@ window.addEventListener('load', () => {
   const room = params.get('room') || 'lobby';
   const nameParam = params.get('name');
   const vipParam = params.get('vipCode') || params.get('vip');
+  const vipTokenParam = params.get('vipToken');
 
   if (nameParam && nameParam.trim()) {
     state.myName = nameParam.trim().slice(0, 30);
@@ -476,25 +477,19 @@ window.addEventListener('load', () => {
   const joinPanel = $('viewerJoinPanel');
   const joinBtn = $('joinRoomBtn');
   const joinStatus = $('joinStatus');
+  let activeVipToken = vipTokenParam ? vipTokenParam.trim() : '';
 
-  const attemptJoin = () => {
-    const chosenName = (nameInput?.value || state.myName || '').trim();
-    if (!chosenName) {
-      if (joinStatus) joinStatus.textContent = 'Please enter a display name.';
-      return;
-    }
-
-    state.myName = chosenName.slice(0, 30);
-    if (joinStatus) joinStatus.textContent = 'Connecting...';
-
+  const completeJoin = (vipToken) => {
+    const codeValue = vipToken ? '' : vipInput?.value.trim();
     if (!socket.connected) socket.connect();
     socket.emit(
       'join-room',
       {
-        room,
+        room: state.currentRoom,
         name: state.myName,
         isViewer: true,
-        vipCode: vipInput?.value.trim()
+        vipToken,
+        vipCode: codeValue
       },
       (resp) => {
         if (resp?.ok) {
@@ -506,6 +501,39 @@ window.addEventListener('load', () => {
         }
       }
     );
+  };
+
+  const attemptJoin = () => {
+    const chosenName = (nameInput?.value || state.myName || '').trim();
+    if (!chosenName) {
+      if (joinStatus) joinStatus.textContent = 'Please enter a display name.';
+      return;
+    }
+
+    state.myName = chosenName.slice(0, 30);
+    if (joinStatus) joinStatus.textContent = 'Connecting...';
+
+    if (activeVipToken) {
+      completeJoin(activeVipToken);
+      return;
+    }
+
+    const code = vipInput?.value.trim();
+    if (code) {
+      if (!socket.connected) socket.connect();
+      socket.emit('redeem-vip-code', { code, desiredName: state.myName }, (resp) => {
+        if (resp?.ok && resp?.roomName) {
+          state.currentRoom = resp.roomName;
+          activeVipToken = resp.vipToken || '';
+          completeJoin(activeVipToken);
+        } else {
+          if (joinStatus) joinStatus.textContent = 'Invalid or expired VIP code.';
+        }
+      });
+      return;
+    }
+
+    completeJoin('');
   };
 
   if (joinBtn) joinBtn.onclick = attemptJoin;
