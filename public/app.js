@@ -490,44 +490,6 @@ function renderHTMLLayout(htmlString) {
   }
 }
 
-function drawOverlay(context) {
-    if (!overlayState.active) return; //
-    if (overlayState.needsRedraw) refreshOverlayImage(); //
-    if (overlayState.image.complete) {
-        context.drawImage(overlayState.image, 0, 0, canvas.width, canvas.height); //
-    }
-}
-
-function renderHTMLLayout(htmlString) {
-    if (!htmlString) return; //
-    ensureOverlayRoot(); //
-    const templateChanged = htmlString !== overlayState.templateRaw; //
-    currentRawHTML = htmlString; //
-    overlayState.templateRaw = htmlString; //
-
-    const previousValues = getOverlayFieldValues(); //
-    const processedHTML = applyOverlayTemplateTokens(htmlString); //
-
-    overlayRoot.innerHTML = processedHTML; //
-    overlayState.fieldIds = detectOverlayFields(); //
-
-    overlayState.fieldIds.forEach(id => {
-        if (!Object.prototype.hasOwnProperty.call(previousValues, id)) return; //
-        const target = overlayRoot.querySelector(`#${escapeOverlaySelector(id)}`); //
-        if (target) target.innerHTML = previousValues[id]; //
-    }); //
-
-    if (templateChanged) {
-        buildOverlayFieldsUI(); //
-    } else if (!$('overlayFields')?.childElementCount) {
-        buildOverlayFieldsUI(); //
-    }
-
-    overlayState.active = true; //
-    overlayActive = true; //
-    overlayState.needsRedraw = true; //
-}
-
 window.setMixerLayout = (mode) => {
   state.mixerLayout = mode;
   document.querySelectorAll('.mixer-btn').forEach((b) => {
@@ -951,8 +913,8 @@ function setupCallPeerConnection(targetId, name) {
  * PeerConnection impact: adds local media tracks for the call.
  */
 function attachLocalTracksToCall(pc) {
-    if (!localStream) return; //
-    localStream.getTracks().forEach(t => pc.addTrack(t, localStream)); //
+    if (!state.localStream) return;
+    state.localStream.getTracks().forEach((t) => pc.addTrack(t, state.localStream));
 }
 
 const hangupBtn = $('hangupBtn'); //
@@ -1020,20 +982,11 @@ async function callPeer(targetId) {
     await startLocalMedia();
   }
 
-  const pc = new RTCPeerConnection(iceConfig);
-  callPeers[targetId] = { pc, name: 'Peer' };
+  const pc = setupCallPeerConnection(targetId, 'Peer');
+  attachLocalTracksToCall(pc);
 
-  pc.onicecandidate = (e) => {
-    if (e.candidate) {
-      socket.emit('call-ice', {
-        targetId,
-        candidate: e.candidate
-      });
-    }
-  };
-
-    const pc = setupCallPeerConnection(targetId, "Peer"); //
-    attachLocalTracksToCall(pc); //
+  const offer = await pc.createOffer();
+  await pc.setLocalDescription(offer);
 
   socket.emit('call-offer', { targetId, offer });
 
@@ -1047,22 +1000,20 @@ async function callPeer(targetId) {
  * PeerConnection impact: sets remote description, creates answer.
  */
 async function handleIncomingCall({ from, name, offer }) {
-    if (!localStream) {
-        await startLocalMedia(); //
-    }
-  };
+  if (!state.localStream) {
+    await startLocalMedia();
+  }
 
-    const pc = setupCallPeerConnection(from, name); //
+  const pc = setupCallPeerConnection(from, name);
+  attachLocalTracksToCall(pc);
 
-  state.localStream.getTracks().forEach((t) => pc.addTrack(t, state.localStream));
-
-    attachLocalTracksToCall(pc); //
+  await pc.setRemoteDescription(new RTCSessionDescription(offer));
+  const answer = await pc.createAnswer();
+  await pc.setLocalDescription(answer);
 
   socket.emit('call-answer', { targetId: from, answer });
 
-    socket.emit('call-answer', { targetId: from, answer }); //
-
-    renderUserList(); //
+  renderUserList();
 }
 
 socket.on('incoming-call', handleIncomingCall);
@@ -1132,9 +1083,9 @@ function endPeerCall(id, isIncomingSignal) {
 function attachBroadcastTracks(pc) {
     canvasStream.getTracks().forEach(t => pc.addTrack(t, canvasStream)); //
 
-    if (localStream) {
-        const at = localStream.getAudioTracks()[0]; //
-        if (at) pc.addTrack(at, mixedStream); //
+    if (state.localStream) {
+        const at = state.localStream.getAudioTracks()[0];
+        if (at) pc.addTrack(at, state.localStream);
     }
 }
 
