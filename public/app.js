@@ -175,6 +175,11 @@ const dom = {
   vipCodeUses: $('vipCodeUses'),
   vipCodeList: $('vipCodeList'),
   vipStatus: $('vipStatus'),
+  paymentEnableToggle: $('paymentEnableToggle'),
+  paymentLabelInput: $('paymentLabelInput'),
+  paymentUrlInput: $('paymentUrlInput'),
+  paymentSaveBtn: $('paymentSaveBtn'),
+  paymentStatus: $('paymentStatus'),
   btnSendPublic: $('btnSendPublic'),
   inputPublic: $('inputPublic'),
   btnSendPrivate: $('btnSendPrivate'),
@@ -1521,6 +1526,7 @@ async function joinRoomAsHost(room) {
           renderVipCodes();
         }
       });
+      loadPaymentConfig(room);
     } else if (resp?.error) {
       alert(resp.error);
       return;
@@ -1786,6 +1792,40 @@ function setVipStatus(message, tone = 'muted') {
   if (!dom.vipStatus) return;
   dom.vipStatus.textContent = message || '';
   dom.vipStatus.style.color = tone === 'error' ? 'var(--danger)' : 'var(--muted)';
+}
+
+function setPaymentStatus(message, tone = 'muted') {
+  if (!dom.paymentStatus) return;
+  dom.paymentStatus.textContent = message || '';
+  dom.paymentStatus.style.color = tone === 'error' ? 'var(--danger)' : 'var(--muted)';
+}
+
+function applyPaymentConfig(config) {
+  state.paymentEnabled = !!config.paymentEnabled;
+  state.paymentLabel = config.paymentLabel || '';
+  state.paymentUrl = config.paymentUrl || '';
+
+  if (dom.paymentEnableToggle) {
+    dom.paymentEnableToggle.checked = state.paymentEnabled;
+  }
+  if (dom.paymentLabelInput) {
+    dom.paymentLabelInput.value = state.paymentLabel;
+  }
+  if (dom.paymentUrlInput) {
+    dom.paymentUrlInput.value = state.paymentUrl;
+  }
+}
+
+async function loadPaymentConfig(roomName) {
+  if (!roomName) return;
+  const resp = await emitWithAck('get-room-config', { roomName });
+  if (resp?.ok) {
+    applyPaymentConfig(resp);
+  }
+}
+
+function isValidPaymentUrl(value) {
+  return value.startsWith('http://') || value.startsWith('https://');
 }
 
 function renderVipUsers() {

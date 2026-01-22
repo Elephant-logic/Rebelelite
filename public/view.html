@@ -58,6 +58,13 @@
           z-index: 101;
       }
       .btn-ctrl { background: rgba(255,255,255,0.1); border: 1px solid rgba(255,255,255,0.2); color: #fff; padding: 6px 12px; border-radius: 4px; cursor: pointer; font-size: 0.8rem; transition: 0.2s; }
+      #paymentBtn {
+          display: none;
+          background: var(--accent);
+          color: #000;
+          border-color: var(--accent);
+          font-weight: 600;
+      }
       
       /* NEW: Pulsing Animation for Unmute Bypass */
       .btn-ctrl.pulse-primary {
@@ -142,6 +149,7 @@
             
             <div id="latencyBadge" style="font-family: monospace; font-size: 0.7rem; color: var(--muted); margin-right: 15px; display:none;">--ms</div>
 
+            <button id="paymentBtn" class="btn-ctrl">Tip the host</button>
             <button id="requestCallBtn" class="btn-ctrl">✋ Request to Join</button>
             <button id="toggleChatBtn" class="btn-ctrl">Toggle Chat</button>
             

@@ -56,7 +56,10 @@ function buildRoomRecord({ roomName, ownerPassword, privacy }) {
     createdAt: Date.now(),
     title: null,
     viewers: 0,
-    vipUsers: []
+    vipUsers: [],
+    paymentEnabled: false,
+    paymentLabel: '',
+    paymentUrl: ''
   };
 }
 
@@ -181,6 +184,20 @@ function generateVipCode(length = 6) {
     output += chars.charAt(Math.floor(Math.random() * chars.length));
   }
   return output;
+}
+
+function normalizePaymentLabel(value) {
+  if (!value || typeof value !== 'string') return '';
+  return value.trim().slice(0, 80);
+}
+
+function normalizePaymentUrl(value) {
+  if (!value || typeof value !== 'string') return '';
+  return value.trim().slice(0, 500);
+}
+
+function isValidPaymentUrl(value) {
+  return typeof value === 'string' && (value.startsWith('http://') || value.startsWith('https://'));
 }
 
 function broadcastRoomUpdate(roomName) {
@@ -383,6 +400,43 @@ io.on('connection', (socket) => {
         room.title = title.slice(0, 100) || null;
       }
     });
+    reply(result.ok ? { ok: true } : { ok: false, error: result.error });
+  });
+
+  socket.on('update-room-payments', ({ roomName, paymentEnabled, paymentLabel, paymentUrl } = {}, callback) => {
+    const reply = typeof callback === 'function' ? callback : () => {};
+    const targetName = normalizeRoomName(roomName);
+    if (!targetName) {
+      reply({ ok: false, error: 'Room name is required.' });
+      return;
+    }
+    const info = rooms[targetName];
+    if (!requireOwner(info, socket)) {
+      reply({ ok: false, error: 'Only the host can update payment settings.' });
+      return;
+    }
+
+    const normalizedLabel = normalizePaymentLabel(paymentLabel);
+    const normalizedUrl = normalizePaymentUrl(paymentUrl);
+    const enabled = !!paymentEnabled;
+
+    if (enabled) {
+      if (!normalizedLabel) {
+        reply({ ok: false, error: 'Payment button label is required.' });
+        return;
+      }
+      if (!normalizedUrl || !isValidPaymentUrl(normalizedUrl)) {
+        reply({ ok: false, error: 'Payment URL must start with http:// or https://.' });
+        return;
+      }
+    }
+
+    const result = updateRoomRecord(targetName, (room) => {
+      room.paymentEnabled = enabled;
+      room.paymentLabel = normalizedLabel;
+      room.paymentUrl = normalizedUrl;
+    });
+
     reply(result.ok ? { ok: true } : { ok: false, error: result.error });
   });
 

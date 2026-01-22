@@ -120,6 +120,31 @@
             <div id="vipStatus" style="font-size:0.7rem; color:var(--muted); margin-top:6px; text-align:center;"></div>
           </div>
 
+          <div class="field" style="margin-top:15px; border-top:1px solid var(--border); padding-top:10px;">
+            <label style="color:var(--accent);">💸 Host Payments</label>
+            <p style="font-size:0.7rem; color:var(--muted); margin-bottom:6px;">
+              Add a support button that opens your payment link.
+            </p>
+            <div class="toggle-row" style="margin-bottom:8px;">
+              <input id="paymentEnableToggle" type="checkbox" />
+              <span>Enable payment button for this room</span>
+            </div>
+            <input
+              id="paymentLabelInput"
+              type="text"
+              placeholder="Tip the host"
+              style="font-size:0.8rem; padding:6px; margin-bottom:6px; width:100%;"
+            />
+            <input
+              id="paymentUrlInput"
+              type="text"
+              placeholder="https://pay.stripe.com/..."
+              style="font-size:0.8rem; padding:6px; margin-bottom:6px; width:100%;"
+            />
+            <button id="paymentSaveBtn" class="btn small secondary full-width">Save</button>
+            <div id="paymentStatus" style="font-size:0.7rem; color:var(--muted); margin-top:6px; text-align:center;"></div>
+          </div>
+
           <button id="lockRoomBtn" class="btn full-width" style="margin-top:15px;">🔓 Lock Room</button>
 
           <div class="field" style="margin-top:20px; border-top:1px solid var(--border); padding-top:10px;">

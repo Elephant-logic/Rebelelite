@@ -484,6 +484,34 @@ async function hydrateRoomInfo(roomName) {
   }
 }
 
+function applyPaymentConfig(config) {
+  state.paymentEnabled = !!config.paymentEnabled;
+  state.paymentLabel = config.paymentLabel || '';
+  state.paymentUrl = config.paymentUrl || '';
+
+  const button = $('paymentBtn');
+  if (!button) return;
+
+  if (state.paymentEnabled && state.paymentUrl) {
+    button.textContent = state.paymentLabel || 'Tip the host';
+    button.style.display = 'inline-block';
+    button.onclick = () => {
+      window.open(state.paymentUrl, '_blank', 'noopener');
+    };
+  } else {
+    button.style.display = 'none';
+    button.onclick = null;
+  }
+}
+
+async function fetchRoomConfig(roomName) {
+  if (!socket.connected) socket.connect();
+  const config = await emitWithAck('get-room-config', { roomName });
+  if (config?.ok) {
+    applyPaymentConfig(config);
+  }
+}
+
 window.addEventListener('load', () => {
   const params = new URLSearchParams(window.location.search);
   const room = params.get('room') || 'lobby';
@@ -527,6 +555,7 @@ window.addEventListener('load', () => {
           state.joined = true;
           if (joinPanel) joinPanel.classList.add('hidden');
           if (joinStatus) joinStatus.textContent = '';
+          fetchRoomConfig(state.currentRoom);
         } else {
           if (joinStatus) joinStatus.textContent = resp?.error || 'Unable to join room.';
         }
