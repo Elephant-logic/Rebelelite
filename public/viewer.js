@@ -182,9 +182,9 @@ function createBroadcastPeerConnection() {
     };
 
     nextPc.onicecandidate = (e) => {
-        if (e.candidate && hostId) {
+        if (e.candidate && state.hostId) {
             socket.emit("webrtc-ice-candidate", {
-                targetId: hostId,
+                targetId: state.hostId,
                 candidate: e.candidate
             });
         }
@@ -199,30 +199,28 @@ function createBroadcastPeerConnection() {
  */
 async function handleBroadcastOffer({ sdp, from }) {
     try {
-        hostId = from;
+        state.hostId = from;
 
-    if (state.pc) {
-      try {
-        state.pc.close();
-      } catch (e) {}
-      state.pc = null;
-    }
+        if (state.pc) {
+            try {
+                state.pc.close();
+            } catch (e) {}
+            state.pc = null;
+        }
 
-        pc = createBroadcastPeerConnection();
+        state.pc = createBroadcastPeerConnection();
 
-        await pc.setRemoteDescription(new RTCSessionDescription(sdp));
-        const answer = await pc.createAnswer();
-        await pc.setLocalDescription(answer);
+        await state.pc.setRemoteDescription(new RTCSessionDescription(sdp));
+        const answer = await state.pc.createAnswer();
+        await state.pc.setLocalDescription(answer);
 
         socket.emit("webrtc-answer", {
-            targetId: hostId,
+            targetId: state.hostId,
             sdp: answer
         });
-      }
-    };
 
         // NEW: Initiate stats polling
-        startStatsReporting(pc);
+        startStatsReporting(state.pc);
     } catch (err) {
         console.error("[Viewer] webrtc-offer failed", err);
     }
@@ -233,9 +231,9 @@ async function handleBroadcastOffer({ sdp, from }) {
  * Called when the server relays webrtc-ice-candidate.
  */
 async function handleBroadcastIceCandidate({ candidate }) {
-    if (!pc || !candidate) return;
+    if (!state.pc || !candidate) return;
     try {
-        await pc.addIceCandidate(new RTCIceCandidate(candidate));
+        await state.pc.addIceCandidate(new RTCIceCandidate(candidate));
     } catch (err) {
         console.error("[Viewer] addIceCandidate failed", err);
     }
@@ -309,12 +307,12 @@ socket.on("ring-alert", handleRingAlert);
  */
 function createCallPeerConnection() {
     const pc2 = new RTCPeerConnection(iceConfig);
-    callPc = pc2;
+    state.callPc = pc2;
 
     pc2.onicecandidate = (e) => {
         if (e.candidate) {
             socket.emit("call-ice", {
-                targetId: hostId,
+                targetId: state.hostId,
                 candidate: e.candidate
             });
         }
@@ -324,7 +322,7 @@ function createCallPeerConnection() {
     console.log('[Viewer] host call track', e.streams[0]);
   };
 
-    localCallStream.getTracks().forEach(t => pc2.addTrack(t, localCallStream));
+    state.localCallStream.getTracks().forEach((t) => pc2.addTrack(t, state.localCallStream));
     return pc2;
 }
 
@@ -337,19 +335,21 @@ async function startCallToHost(targetId) {
 
     await ensureLocalCallStream();
 
-    if (callPc) {
-        try { callPc.close(); } catch (e) {}
-        callPc = null;
+    if (state.callPc) {
+        try {
+            state.callPc.close();
+        } catch (e) {}
+        state.callPc = null;
     }
 
-    hostId = targetId;
+    state.hostId = targetId;
     const pc2 = createCallPeerConnection();
 
   const offer = await pc2.createOffer();
   await pc2.setLocalDescription(offer);
 
     socket.emit("call-offer", {
-        targetId: hostId,
+        targetId: state.hostId,
         offer
     });
 }
@@ -359,9 +359,9 @@ async function startCallToHost(targetId) {
  * Called when the server relays call-answer.
  */
 async function handleCallAnswer({ from, answer }) {
-    if (!callPc || !answer) return;
+    if (!state.callPc || !answer) return;
     try {
-        await callPc.setRemoteDescription(new RTCSessionDescription(answer));
+        await state.callPc.setRemoteDescription(new RTCSessionDescription(answer));
     } catch (err) {
         console.error("[Viewer] remote answer failed", err);
     }
@@ -372,9 +372,9 @@ async function handleCallAnswer({ from, answer }) {
  * Signaling direction: [HOST] -> (call-ice) -> [SERVER] -> [VIEWER]
  */
 async function handleCallIce({ from, candidate }) {
-    if (!callPc || !candidate) return;
+    if (!state.callPc || !candidate) return;
     try {
-        await callPc.addIceCandidate(new RTCIceCandidate(candidate));
+        await state.callPc.addIceCandidate(new RTCIceCandidate(candidate));
     } catch (err) {
         console.error("[Viewer] call ICE failed", err);
     }
@@ -385,9 +385,11 @@ async function handleCallIce({ from, candidate }) {
  * Signaling direction: [HOST] -> (call-end) -> [SERVER] -> [VIEWER]
  */
 function handleCallEnd({ from }) {
-    if (callPc) {
-        try { callPc.close(); } catch (e) {}
-        callPc = null;
+    if (state.callPc) {
+        try {
+            state.callPc.close();
+        } catch (e) {}
+        state.callPc = null;
     }
 }
 
