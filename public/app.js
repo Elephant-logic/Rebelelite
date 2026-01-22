@@ -461,6 +461,44 @@ function renderHTMLLayout(htmlString) {
   }
 }
 
+function drawOverlay(context) {
+    if (!overlayState.active) return; //
+    if (overlayState.needsRedraw) refreshOverlayImage(); //
+    if (overlayState.image.complete) {
+        context.drawImage(overlayState.image, 0, 0, canvas.width, canvas.height); //
+    }
+}
+
+function renderHTMLLayout(htmlString) {
+    if (!htmlString) return; //
+    ensureOverlayRoot(); //
+    const templateChanged = htmlString !== overlayState.templateRaw; //
+    currentRawHTML = htmlString; //
+    overlayState.templateRaw = htmlString; //
+
+    const previousValues = getOverlayFieldValues(); //
+    const processedHTML = applyOverlayTemplateTokens(htmlString); //
+
+    overlayRoot.innerHTML = processedHTML; //
+    overlayState.fieldIds = detectOverlayFields(); //
+
+    overlayState.fieldIds.forEach(id => {
+        if (!Object.prototype.hasOwnProperty.call(previousValues, id)) return; //
+        const target = overlayRoot.querySelector(`#${escapeOverlaySelector(id)}`); //
+        if (target) target.innerHTML = previousValues[id]; //
+    }); //
+
+    if (templateChanged) {
+        buildOverlayFieldsUI(); //
+    } else if (!$('overlayFields')?.childElementCount) {
+        buildOverlayFieldsUI(); //
+    }
+
+    overlayState.active = true; //
+    overlayActive = true; //
+    overlayState.needsRedraw = true; //
+}
+
 window.setMixerLayout = (mode) => {
   state.mixerLayout = mode;
   document.querySelectorAll('.mixer-btn').forEach((b) => {
