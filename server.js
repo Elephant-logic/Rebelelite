@@ -18,7 +18,7 @@ const io = new Server(server, {
 
 app.use(express.static(path.join(__dirname, 'public')));
 
-// In-memory room state
+// In-memory room state (per room: owner, lock state, users)
 const rooms = Object.create(null);
 
 function getRoomInfo(roomName) {
@@ -33,6 +33,7 @@ function getRoomInfo(roomName) {
   return rooms[roomName];
 }
 
+// Broadcast the latest room state to everyone in the room.
 function broadcastRoomUpdate(roomName) {
   const room = rooms[roomName];
   if (!room) return;
@@ -55,10 +56,18 @@ function broadcastRoomUpdate(roomName) {
   });
 }
 
+// Relay helper to keep signaling logic centralized (no behavior changes).
+function relayToTarget(eventName, targetId, payload) {
+  if (targetId) io.to(targetId).emit(eventName, payload);
+}
+
 io.on('connection', (socket) => {
   socket.data.room = null;
   socket.data.name = null;
 
+  // ======================================================
+  // ROOM JOIN + ROLE ASSIGNMENT
+  // ======================================================
   socket.on('join-room', ({ room, name, isViewer }) => {
     if (!room || typeof room !== 'string') {
       socket.emit('room-error', 'Invalid room');
@@ -101,6 +110,7 @@ io.on('connection', (socket) => {
     broadcastRoomUpdate(roomName);
   });
 
+  // Viewer "raise hand" request (host receives a prompt)
   socket.on('request-to-call', () => {
     const roomName = socket.data.room;
     if (!roomName) return;
@@ -119,6 +129,7 @@ io.on('connection', (socket) => {
     }
   });
 
+  // Host handoff (ownership transfer)
   socket.on('promote-to-host', ({ targetId }) => {
     const roomName = socket.data.room;
     if (!roomName) return;
@@ -134,6 +145,7 @@ io.on('connection', (socket) => {
     }
   });
 
+  // Room locking (host only)
   socket.on('lock-room', (locked) => {
     const roomName = socket.data.room;
     if (!roomName) return;
@@ -143,6 +155,7 @@ io.on('connection', (socket) => {
     broadcastRoomUpdate(roomName);
   });
 
+  // Stream title update (host only)
   socket.on('update-stream-title', (title) => {
     const roomName = socket.data.room;
     if (!roomName) return;
@@ -152,6 +165,7 @@ io.on('connection', (socket) => {
     broadcastRoomUpdate(roomName);
   });
 
+  // Remove a user from the room (host only)
   socket.on('kick-user', (targetId) => {
     const roomName = socket.data.room;
     if (!roomName) return;
@@ -168,32 +182,43 @@ io.on('connection', (socket) => {
     broadcastRoomUpdate(roomName);
   });
 
+  // ======================================================
+  // WEBRTC BROADCAST SIGNALING (host <-> viewer)
+  // ======================================================
   socket.on('webrtc-offer', ({ targetId, sdp }) => {
-    if (targetId && sdp) io.to(targetId).emit('webrtc-offer', { sdp, from: socket.id });
+    if (targetId && sdp) relayToTarget('webrtc-offer', targetId, { sdp, from: socket.id });
   });
   socket.on('webrtc-answer', ({ targetId, sdp }) => {
-    if (targetId && sdp) io.to(targetId).emit('webrtc-answer', { sdp, from: socket.id });
+    if (targetId && sdp) relayToTarget('webrtc-answer', targetId, { sdp, from: socket.id });
   });
   socket.on('webrtc-ice-candidate', ({ targetId, candidate }) => {
-    if (targetId && candidate) io.to(targetId).emit('webrtc-ice-candidate', { candidate, from: socket.id });
+    if (targetId && candidate) relayToTarget('webrtc-ice-candidate', targetId, { candidate, from: socket.id });
   });
 
+  // ======================================================
+  // CALL SIGNALING (host <-> viewer 1:1)
+  // ======================================================
   socket.on('ring-user', (targetId) => {
-    if (targetId) io.to(targetId).emit('ring-alert', { from: socket.data.name, fromId: socket.id });
+    relayToTarget('ring-alert', targetId, { from: socket.data.name, fromId: socket.id });
   });
   socket.on('call-offer', ({ targetId, offer }) => {
-    if (targetId && offer) io.to(targetId).emit('incoming-call', { from: socket.id, name: socket.data.name, offer });
+    if (targetId && offer) {
+      relayToTarget('incoming-call', targetId, { from: socket.id, name: socket.data.name, offer });
+    }
   });
   socket.on('call-answer', ({ targetId, answer }) => {
-    if (targetId && answer) io.to(targetId).emit('call-answer', { from: socket.id, answer });
+    if (targetId && answer) relayToTarget('call-answer', targetId, { from: socket.id, answer });
   });
   socket.on('call-ice', ({ targetId, candidate }) => {
-    if (targetId && candidate) io.to(targetId).emit('call-ice', { from: socket.id, candidate });
+    if (targetId && candidate) relayToTarget('call-ice', targetId, { from: socket.id, candidate });
   });
   socket.on('call-end', ({ targetId }) => {
-    if (targetId) io.to(targetId).emit('call-end', { from: socket.id });
+    relayToTarget('call-end', targetId, { from: socket.id });
   });
 
+  // ======================================================
+  // CHAT + FILE EVENTS
+  // ======================================================
   socket.on('public-chat', ({ room, name, text, fromViewer }) => {
     const roomName = room || socket.data.room;
     if (!roomName || !text) return;
@@ -228,6 +253,9 @@ io.on('connection', (socket) => {
     });
   });
 
+  // ======================================================
+  // CLEANUP
+  // ======================================================
   socket.on('disconnect', () => {
     const roomName = socket.data.room;
     if (!roomName) return;
