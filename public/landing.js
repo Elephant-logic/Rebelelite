@@ -87,6 +87,7 @@ if (claimRoomForm) {
       if (response?.ok) {
         setStatus(claimRoomStatus, 'Room claimed. Redirecting to host studio...', 'ok');
         sessionStorage.setItem(`hostPassword:${name}`, password);
+        sessionStorage.setItem(`hostAccess:${name}`, '1');
         window.location.href = `/index.html?room=${encodeURIComponent(name)}&role=host&authed=1`;
       } else {
         setStatus(claimRoomStatus, response?.error || 'Unable to claim room.', 'error');

@@ -20,6 +20,10 @@ app.get('/', (req, res) => {
   res.sendFile(path.join(__dirname, 'public', 'landing.html'));
 });
 
+app.get('/selftest', (req, res) => {
+  res.sendFile(path.join(__dirname, 'public', 'selftest.html'));
+});
+
 app.use(express.static(path.join(__dirname, 'public')));
 
 // In-memory room state (per room: owner, lock state, users)
