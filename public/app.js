@@ -805,12 +805,16 @@ socket.on('ring-alert', async ({ from, fromId }) => {
 socket.on('call-request-received', ({ id, name }) => {
     const privateLog = $('chatLogPrivate'); //
     if (privateLog) {
+        const atBottom =
+            privateLog.scrollHeight - privateLog.scrollTop <= privateLog.clientHeight + 20; //
         const div = document.createElement('div'); //
         div.className = 'chat-line system-msg'; //
         div.style.color = "var(--accent)"; //
         div.innerHTML = `<strong>✋ CALL REQUEST:</strong> ${name} wants to join the stream.`; //
         privateLog.appendChild(div); //
-        privateLog.scrollTop = privateLog.scrollHeight; //
+        if (atBottom) {
+            privateLog.scrollTop = privateLog.scrollHeight; //
+        }
     }
 
     // NEW: behave like a call – give you a choice to ring them now
@@ -1243,6 +1247,9 @@ function renderGuestList() {
 function appendChat(log, name, text, ts) {
     if (!log) return; //
 
+    const atBottom =
+        log.scrollHeight - log.scrollTop <= log.clientHeight + 20; //
+
     const d = document.createElement('div'); //
     d.className = 'chat-line'; //
 
@@ -1258,7 +1265,9 @@ function appendChat(log, name, text, ts) {
     d.appendChild(document.createTextNode(`: ${text}`)); //
 
     log.appendChild(d); //
-    log.scrollTop = log.scrollHeight; //
+    if (atBottom) {
+        log.scrollTop = log.scrollHeight; //
+    }
 }
 
 function sendPublic() {
