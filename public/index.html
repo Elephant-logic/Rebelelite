@@ -80,26 +80,22 @@
           </div>
 
           <div class="field" style="margin-top:15px; border-top:1px solid var(--border); padding-top:10px;">
-            <label style="color:var(--danger);">⛔ VIP / Private Room</label>
-            <div style="display:flex; align-items:center; gap:10px; margin-bottom:10px;">
-                <span style="font-size:0.75rem; color:var(--muted);">Private Mode:</span>
-                <button id="togglePrivateBtn" class="btn small secondary" style="flex:1">OFF</button>
-            </div>
-            <div id="guestListPanel" style="display:none;">
-                <div style="display:flex; gap:5px;">
-                    <input id="guestNameInput" type="text" placeholder="Name (e.g. Dave)" style="font-size:0.8rem; padding:6px;" />
-                    <button id="addGuestBtn" class="btn small primary">+</button>
-                </div>
-                <div id="guestListDisplay" style="margin-top:5px; max-height:80px; overflow-y:auto; display:flex; flex-wrap:wrap; gap:4px;">
-                </div>
-            </div>
-          </div>
-
-          <div class="field" style="margin-top:15px; border-top:1px solid var(--border); padding-top:10px;">
-            <label style="color:var(--accent);">✨ VIP Access</label>
+            <label style="color:var(--accent);">🔒 Room Privacy &amp; VIP Access</label>
             <p style="font-size:0.7rem; color:var(--muted); margin-bottom:6px;">
               Grant guest access by username or shareable code.
             </p>
+            <div style="display:flex; align-items:center; gap:10px; margin-bottom:10px;">
+              <span style="font-size:0.75rem; color:var(--muted);">Private Room:</span>
+              <button id="togglePrivateBtn" class="btn small secondary" style="flex:1">OFF</button>
+            </div>
+            <div id="guestListPanel" style="display:none; margin-bottom:10px;">
+              <div style="display:flex; gap:5px;">
+                <input id="guestNameInput" type="text" placeholder="Name (e.g. Dave)" style="font-size:0.8rem; padding:6px;" />
+                <button id="addGuestBtn" class="btn small primary">+</button>
+              </div>
+              <div id="guestListDisplay" style="margin-top:5px; max-height:80px; overflow-y:auto; display:flex; flex-wrap:wrap; gap:4px;">
+              </div>
+            </div>
             <div style="display:flex; align-items:center; gap:10px; margin-bottom:10px;">
               <span style="font-size:0.75rem; color:var(--muted);">VIP Required:</span>
               <button id="vipRequiredToggle" class="btn small danger" style="flex:1">ON</button>
