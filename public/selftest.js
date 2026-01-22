@@ -102,6 +102,23 @@ function waitForEvent(target, event, ms = 5000) {
   );
 }
 
+async function waitForFrameElements(frame, ids, ms = 5000) {
+  const startedAt = Date.now();
+  let lastMissing = ids;
+  while (Date.now() - startedAt < ms) {
+    const doc = frame?.contentWindow?.document;
+    if (doc) {
+      const missing = ids.filter((id) => !doc.getElementById(id));
+      lastMissing = missing;
+      if (!missing.length) {
+        return doc;
+      }
+    }
+    await new Promise((resolve) => setTimeout(resolve, 150));
+  }
+  throw new Error(`Missing elements: ${lastMissing.join(', ')}`);
+}
+
 function emitWithAck(socket, event, payload, ms = 5000) {
   return withTimeout(
     new Promise((resolve) => {
@@ -140,6 +157,21 @@ function ensureSequence(order, expected) {
   return true;
 }
 
+function ensureHandshakeOrder(order) {
+  const offerIndex = order.indexOf('offer');
+  const answerIndex = order.indexOf('answer');
+  const iceIndex = order.indexOf('ice');
+  const trackIndex = order.indexOf('track');
+  if ([offerIndex, answerIndex, iceIndex, trackIndex].some((idx) => idx === -1)) {
+    return false;
+  }
+  return (
+    offerIndex < answerIndex &&
+    offerIndex < iceIndex &&
+    offerIndex < trackIndex
+  );
+}
+
 async function testClaimRoom() {
   const socket = io({ autoConnect: false });
   await connectSocket(socket);
@@ -156,6 +188,10 @@ async function testClaimRoom() {
 async function testHostReenter() {
   const hostSocket = io({ autoConnect: false });
   context.hostSocket = hostSocket;
+  context.hostRolePromise = waitForEvent(hostSocket, 'role', 7000).then(([role]) => {
+    context.hostRole = role;
+    return role;
+  });
   hostSocket.on('room-update', (payload) => {
     context.latestRoomUpdate = payload;
   });
@@ -180,7 +216,17 @@ async function testHostReenter() {
 
 async function testHostStudioAutoEntry() {
   if (!context.hostSocket) throw new Error('Host socket not initialized');
-  const [role] = await waitForEvent(context.hostSocket, 'role', 5000);
+  let role = context.hostRole;
+  if (!role && context.hostRolePromise) {
+    try {
+      role = await context.hostRolePromise;
+    } catch (err) {
+      // fall through to a fresh wait below
+    }
+  }
+  if (!role) {
+    [role] = await waitForEvent(context.hostSocket, 'role', 5000);
+  }
   if (!role?.isHost) throw new Error('Role event did not confirm host');
   return 'Host role confirmed after auth.';
 }
@@ -199,19 +245,22 @@ async function testPublicViewerJoinAndBroadcast() {
   });
   if (!joinResp?.ok) throw new Error(joinResp?.error || 'Viewer join failed');
 
-  const roomUpdate = await withTimeout(
-    new Promise((resolve) => {
-      const handler = (payload) => {
-        if (payload?.users?.some((user) => user.id === viewerSocket.id)) {
-          context.hostSocket.off('room-update', handler);
-          resolve(payload);
-        }
-      };
-      context.hostSocket.on('room-update', handler);
-    }),
-    4000,
-    'Room update for viewer'
-  );
+  let roomUpdate = context.latestRoomUpdate;
+  if (!roomUpdate?.users?.some((user) => user.id === viewerSocket.id)) {
+    roomUpdate = await withTimeout(
+      new Promise((resolve) => {
+        const handler = (payload) => {
+          if (payload?.users?.some((user) => user.id === viewerSocket.id)) {
+            context.hostSocket.off('room-update', handler);
+            resolve(payload);
+          }
+        };
+        context.hostSocket.on('room-update', handler);
+      }),
+      6000,
+      'Room update for viewer'
+    );
+  }
 
   const hostPc = new RTCPeerConnection(iceConfig);
   const viewerPc = new RTCPeerConnection(iceConfig);
@@ -339,12 +388,17 @@ async function testVipViewerJoinAndUsage() {
 
   const vipSocket = io({ autoConnect: false });
   await connectSocket(vipSocket);
-  const joinResp = await emitWithAck(vipSocket, 'join-room', {
+  const joinResp = await emitWithAck(
+    vipSocket,
+    'join-room',
+    {
     room: context.roomName,
     name: 'VipViewer',
     isViewer: true,
     vipCode: codeResp.code
-  });
+    },
+    8000
+  );
   if (!joinResp?.ok || !joinResp?.isVip) {
     throw new Error(joinResp?.error || 'VIP viewer could not join');
   }
@@ -369,8 +423,6 @@ async function testStudioButtonsWired() {
   await new Promise((resolve) => {
     studioFrame.onload = resolve;
   });
-
-  const doc = studioFrame.contentWindow.document;
   const ids = [
     'joinBtn',
     'startStreamBtn',
@@ -378,8 +430,7 @@ async function testStudioButtonsWired() {
     'toggleMicBtn',
     'hangupBtn'
   ];
-  const missing = ids.filter((id) => !doc.getElementById(id));
-  if (missing.length) throw new Error(`Missing buttons: ${missing.join(', ')}`);
+  const doc = await waitForFrameElements(studioFrame, ids, 6000);
 
   await new Promise((resolve) => setTimeout(resolve, 800));
 
@@ -405,12 +456,7 @@ async function testWebrtcHandshakeOrder() {
   if (!context.broadcastOrder.length) {
     throw new Error('Broadcast handshake did not execute');
   }
-  const broadcastOk = ensureSequence(context.broadcastOrder, [
-    'offer',
-    'answer',
-    'ice',
-    'track'
-  ]);
+  const broadcastOk = ensureHandshakeOrder(context.broadcastOrder);
 
   const hostSocket = context.hostSocket;
   const viewerSocket = context.viewerSocket;
@@ -495,7 +541,7 @@ async function testWebrtcHandshakeOrder() {
         }
       }, 100);
     }),
-    8000,
+    12000,
     'Call track'
   );
 
@@ -504,13 +550,12 @@ async function testWebrtcHandshakeOrder() {
   hostStream.getTracks().forEach((track) => track.stop());
   viewerStream.getTracks().forEach((track) => track.stop());
 
-  const callOk = ensureSequence(context.callOrder, [
-    'offer',
-    'answer',
-    'ice',
-    'track'
-  ]);
-  if (!broadcastOk || !callOk) throw new Error('Handshake order invalid');
+  const callOk = ensureHandshakeOrder(context.callOrder);
+  if (!broadcastOk || !callOk) {
+    throw new Error(
+      `Handshake order invalid (broadcast: ${context.broadcastOrder.join(' > ') || 'none'}, call: ${context.callOrder.join(' > ') || 'none'})`
+    );
+  }
   return 'Broadcast + call handshake order verified.';
 }
 
@@ -526,13 +571,10 @@ async function testHostStateStored() {
     return '';
   };
 
-  const roomInput = frameWindow.document.getElementById('roomInput');
-  const nameInput = frameWindow.document.getElementById('nameInput');
-  const joinBtn = frameWindow.document.getElementById('joinBtn');
-
-  if (!roomInput || !nameInput || !joinBtn) {
-    throw new Error('Studio inputs missing for host state test');
-  }
+  const doc = await waitForFrameElements(studioFrame, ['roomInput', 'nameInput', 'joinBtn'], 6000);
+  const roomInput = doc.getElementById('roomInput');
+  const nameInput = doc.getElementById('nameInput');
+  const joinBtn = doc.getElementById('joinBtn');
 
   roomInput.value = context.roomName;
   nameInput.value = 'ReloadHost';

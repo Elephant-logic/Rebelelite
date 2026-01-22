@@ -115,14 +115,15 @@ function listVipCodes(record) {
   return Object.entries(record.vipCodes).map(([code, meta]) => ({
     code,
     maxUses: meta.maxUses,
-    usesLeft: meta.usesLeft
+    usesLeft: meta.usesLeft,
+    used: Math.max(0, meta.maxUses - meta.usesLeft)
   }));
 }
 
 function emitVipCodesUpdate(roomName) {
   const info = rooms[roomName];
   if (!info || !info.ownerId) return;
-  const record = getStoredRoom(roomName);
+  const record = getRoomRecord(roomName);
   if (!record) return;
   io.to(info.ownerId).emit('vip-codes-updated', listVipCodes(record));
 }
