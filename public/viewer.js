@@ -21,10 +21,9 @@
 const $ = id => document.getElementById(id);
 const socket = io({ autoConnect: false });
 
-// ICE config (uses ICE_SERVERS from ice.js if present, else Google STUN)
-const iceConfig = (typeof ICE_SERVERS !== 'undefined' && Array.isArray(ICE_SERVERS) && ICE_SERVERS.length)
-  ? { iceServers: ICE_SERVERS }
-  : { iceServers: [{ urls: 'stun:stun.l.google.com:19302' }] };
+function getRtcConfig() {
+  return { iceServers: getIceServers(state.turnConfig) };
+}
 
 const state = {
   pc: null,
@@ -36,8 +35,63 @@ const state = {
   statsInterval: null,
   joined: false,
   roomPrivacy: 'public',
-  vipRequired: true
+  vipRequired: true,
+  turnConfig: {
+    enabled: false,
+    host: '',
+    port: '',
+    tlsPort: '',
+    username: '',
+    password: ''
+  }
 };
+
+function logSelectedCandidate(label, report) {
+  if (!report) return;
+  const candidateType = report.candidateType || report.type;
+  const transport = report.protocol || report.transport;
+  if (!candidateType || !transport) return;
+  console.log(`[WebRTC] ${label} selected candidate: ${candidateType} (${transport})`);
+}
+
+function attachCandidateDiagnostics(pc, label) {
+  let logged = false;
+  const attemptLog = async () => {
+    if (logged) return;
+    if (!['connected', 'completed'].includes(pc.iceConnectionState)) return;
+    const stats = await pc.getStats();
+    let selectedPair = null;
+    stats.forEach((report) => {
+      if (report.type === 'candidate-pair' && report.selected) {
+        selectedPair = report;
+      }
+    });
+    if (!selectedPair) {
+      stats.forEach((report) => {
+        if (report.type === 'transport' && report.selectedCandidatePairId) {
+          stats.forEach((pair) => {
+            if (pair.id === report.selectedCandidatePairId) {
+              selectedPair = pair;
+            }
+          });
+        }
+      });
+    }
+    if (!selectedPair) return;
+    let localCandidate = null;
+    stats.forEach((report) => {
+      if (report.id === selectedPair.localCandidateId) {
+        localCandidate = report;
+      }
+    });
+    if (localCandidate) {
+      logSelectedCandidate(label, localCandidate);
+      logged = true;
+    }
+  };
+  pc.addEventListener('iceconnectionstatechange', attemptLog);
+  pc.addEventListener('connectionstatechange', attemptLog);
+}
 
 // ======================================================
 // REAL-TIME HEALTH REPORTING (Professional Patch)
@@ -175,7 +229,8 @@ function attachViewerStream(stream) {
  * Signaling direction: [VIEWER] -> (webrtc-answer) -> [SERVER] -> [HOST]
  */
 function createBroadcastPeerConnection() {
-    const nextPc = new RTCPeerConnection(iceConfig);
+    const nextPc = new RTCPeerConnection(getRtcConfig());
+    attachCandidateDiagnostics(nextPc, 'Broadcast');
     setupReceiver(nextPc);
 
     nextPc.ontrack = (e) => {
@@ -209,6 +264,7 @@ async function handleBroadcastOffer({ sdp, from }) {
             state.pc = null;
         }
 
+        await fetchRoomConfig(state.currentRoom);
         state.pc = createBroadcastPeerConnection();
 
         await state.pc.setRemoteDescription(new RTCSessionDescription(sdp));
@@ -307,7 +363,8 @@ socket.on("ring-alert", handleRingAlert);
  * Signaling direction: [VIEWER] -> (call-offer) -> [SERVER] -> [HOST]
  */
 function createCallPeerConnection() {
-    const pc2 = new RTCPeerConnection(iceConfig);
+    const pc2 = new RTCPeerConnection(getRtcConfig());
+    attachCandidateDiagnostics(pc2, 'Call');
     state.callPc = pc2;
 
     pc2.onicecandidate = (e) => {
@@ -504,11 +561,24 @@ function applyPaymentConfig(config) {
   }
 }
 
+function applyTurnConfig(config) {
+  const turn = config?.turnConfig || config || {};
+  state.turnConfig = {
+    enabled: !!turn.enabled,
+    host: turn.host || '',
+    port: turn.port || '',
+    tlsPort: turn.tlsPort || '',
+    username: turn.username || '',
+    password: turn.password || ''
+  };
+}
+
 async function fetchRoomConfig(roomName) {
   if (!socket.connected) socket.connect();
   const config = await emitWithAck('get-room-config', { roomName });
   if (config?.ok) {
     applyPaymentConfig(config);
+    applyTurnConfig(config.turnConfig);
   }
 }
 

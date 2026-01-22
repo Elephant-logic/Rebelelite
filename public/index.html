@@ -145,6 +145,52 @@
             <div id="paymentStatus" style="font-size:0.7rem; color:var(--muted); margin-top:6px; text-align:center;"></div>
           </div>
 
+          <div class="field" style="margin-top:15px; border-top:1px solid var(--border); padding-top:10px;">
+            <label style="color:var(--accent);">🛰️ TURN / Relay</label>
+            <p style="font-size:0.7rem; color:var(--muted); margin-bottom:6px;">
+              Optional relay for mobile-safe mode. Default remains STUN-only.
+            </p>
+            <div class="toggle-row" style="margin-bottom:8px;">
+              <input id="turnEnableToggle" type="checkbox" />
+              <span>Enable relay / mobile-safe mode for this room</span>
+            </div>
+            <details id="turnAdvanced" style="font-size:0.8rem;">
+              <summary style="cursor:pointer; color:var(--muted); margin-bottom:6px;">Advanced</summary>
+              <input
+                id="turnHostInput"
+                type="text"
+                placeholder="TURN host (e.g. turn.example.com)"
+                style="font-size:0.8rem; padding:6px; margin-bottom:6px; width:100%;"
+              />
+              <input
+                id="turnPortInput"
+                type="number"
+                placeholder="TURN port (e.g. 3478)"
+                style="font-size:0.8rem; padding:6px; margin-bottom:6px; width:100%;"
+              />
+              <input
+                id="turnTlsPortInput"
+                type="number"
+                placeholder="TURN TLS port (optional, e.g. 5349)"
+                style="font-size:0.8rem; padding:6px; margin-bottom:6px; width:100%;"
+              />
+              <input
+                id="turnUsernameInput"
+                type="text"
+                placeholder="TURN username"
+                style="font-size:0.8rem; padding:6px; margin-bottom:6px; width:100%;"
+              />
+              <input
+                id="turnPasswordInput"
+                type="password"
+                placeholder="TURN password"
+                style="font-size:0.8rem; padding:6px; margin-bottom:6px; width:100%;"
+              />
+            </details>
+            <button id="turnSaveBtn" class="btn small secondary full-width">Save</button>
+            <div id="turnStatus" style="font-size:0.7rem; color:var(--muted); margin-top:6px; text-align:center;"></div>
+          </div>
+
           <button id="lockRoomBtn" class="btn full-width" style="margin-top:15px;">🔓 Lock Room</button>
 
           <div class="field" style="margin-top:20px; border-top:1px solid var(--border); padding-top:10px;">

@@ -125,15 +125,70 @@ const state = {
   overlayRenderCount: 0,
   vipUsers: [],
   vipCodes: [],
-  vipRequired: true
+  vipRequired: true,
+  turnConfig: {
+    enabled: false,
+    host: '',
+    port: '',
+    tlsPort: '',
+    username: '',
+    password: ''
+  }
 };
 
 const viewerPeers = {};
 const callPeers = {};
 
-const iceConfig = (typeof ICE_SERVERS !== 'undefined' && ICE_SERVERS.length)
-  ? { iceServers: ICE_SERVERS }
-  : { iceServers: [{ urls: 'stun:stun.l.google.com:19302' }] };
+function getRtcConfig() {
+  return { iceServers: getIceServers(state.turnConfig) };
+}
+
+function logSelectedCandidate(label, report) {
+  if (!report) return;
+  const candidateType = report.candidateType || report.type;
+  const transport = report.protocol || report.transport;
+  if (!candidateType || !transport) return;
+  console.log(`[WebRTC] ${label} selected candidate: ${candidateType} (${transport})`);
+}
+
+function attachCandidateDiagnostics(pc, label) {
+  let logged = false;
+  const attemptLog = async () => {
+    if (logged) return;
+    if (!['connected', 'completed'].includes(pc.iceConnectionState)) return;
+    const stats = await pc.getStats();
+    let selectedPair = null;
+    stats.forEach((report) => {
+      if (report.type === 'candidate-pair' && report.selected) {
+        selectedPair = report;
+      }
+    });
+    if (!selectedPair) {
+      stats.forEach((report) => {
+        if (report.type === 'transport' && report.selectedCandidatePairId) {
+          stats.forEach((pair) => {
+            if (pair.id === report.selectedCandidatePairId) {
+              selectedPair = pair;
+            }
+          });
+        }
+      });
+    }
+    if (!selectedPair) return;
+    let localCandidate = null;
+    stats.forEach((report) => {
+      if (report.id === selectedPair.localCandidateId) {
+        localCandidate = report;
+      }
+    });
+    if (localCandidate) {
+      logSelectedCandidate(label, localCandidate);
+      logged = true;
+    }
+  };
+  pc.addEventListener('iceconnectionstatechange', attemptLog);
+  pc.addEventListener('connectionstatechange', attemptLog);
+}
 
 const dom = {
   previewModal: $('streamPreviewModal'),
@@ -180,6 +235,15 @@ const dom = {
   paymentUrlInput: $('paymentUrlInput'),
   paymentSaveBtn: $('paymentSaveBtn'),
   paymentStatus: $('paymentStatus'),
+  turnEnableToggle: $('turnEnableToggle'),
+  turnAdvanced: $('turnAdvanced'),
+  turnHostInput: $('turnHostInput'),
+  turnPortInput: $('turnPortInput'),
+  turnTlsPortInput: $('turnTlsPortInput'),
+  turnUsernameInput: $('turnUsernameInput'),
+  turnPasswordInput: $('turnPasswordInput'),
+  turnSaveBtn: $('turnSaveBtn'),
+  turnStatus: $('turnStatus'),
   btnSendPublic: $('btnSendPublic'),
   inputPublic: $('inputPublic'),
   btnSendPrivate: $('btnSendPrivate'),
@@ -1152,8 +1216,9 @@ if (startStreamBtn) {
  * PeerConnection impact: registers ICE + track handlers.
  */
 function setupCallPeerConnection(targetId, name) {
-    const pc = new RTCPeerConnection(iceConfig); //
+    const pc = new RTCPeerConnection(getRtcConfig()); //
     callPeers[targetId] = { pc, name }; //
+    attachCandidateDiagnostics(pc, `Call:${name || targetId}`); //
 
     pc.onicecandidate = e => {
         if (e.candidate) {
@@ -1357,8 +1422,9 @@ function attachBroadcastTracks(pc) {
  * PeerConnection impact: adds mixer tracks + configures ICE.
  */
 function setupViewerPeerConnection(targetId) {
-    const pc = new RTCPeerConnection(iceConfig); //
+    const pc = new RTCPeerConnection(getRtcConfig()); //
     viewerPeers[targetId] = pc; //
+    attachCandidateDiagnostics(pc, `Broadcast:${targetId}`); //
 
     pc.createDataChannel("control"); //
 
@@ -1526,7 +1592,7 @@ async function joinRoomAsHost(room) {
           renderVipCodes();
         }
       });
-      loadPaymentConfig(room);
+      loadRoomConfig(room);
     } else if (resp?.error) {
       alert(resp.error);
       return;
@@ -1800,6 +1866,12 @@ function setPaymentStatus(message, tone = 'muted') {
   dom.paymentStatus.style.color = tone === 'error' ? 'var(--danger)' : 'var(--muted)';
 }
 
+function setTurnStatus(message, tone = 'muted') {
+  if (!dom.turnStatus) return;
+  dom.turnStatus.textContent = message || '';
+  dom.turnStatus.style.color = tone === 'error' ? 'var(--danger)' : 'var(--muted)';
+}
+
 function applyPaymentConfig(config) {
   state.paymentEnabled = !!config.paymentEnabled;
   state.paymentLabel = config.paymentLabel || '';
@@ -1816,11 +1888,74 @@ function applyPaymentConfig(config) {
   }
 }
 
-async function loadPaymentConfig(roomName) {
+function applyTurnConfig(config) {
+  const turn = config?.turnConfig || config || {};
+  state.turnConfig = {
+    enabled: !!turn.enabled,
+    host: turn.host || '',
+    port: turn.port || '',
+    tlsPort: turn.tlsPort || '',
+    username: turn.username || '',
+    password: turn.password || ''
+  };
+
+  if (dom.turnEnableToggle) {
+    dom.turnEnableToggle.checked = state.turnConfig.enabled;
+  }
+  if (dom.turnHostInput) {
+    dom.turnHostInput.value = state.turnConfig.host;
+  }
+  if (dom.turnPortInput) {
+    dom.turnPortInput.value = state.turnConfig.port || '';
+  }
+  if (dom.turnTlsPortInput) {
+    dom.turnTlsPortInput.value = state.turnConfig.tlsPort || '';
+  }
+  if (dom.turnUsernameInput) {
+    dom.turnUsernameInput.value = state.turnConfig.username;
+  }
+  if (dom.turnPasswordInput) {
+    dom.turnPasswordInput.value = state.turnConfig.password;
+  }
+}
+
+function collectTurnConfigFromInputs() {
+  const enabled = !!dom.turnEnableToggle?.checked;
+  const host = dom.turnHostInput?.value.trim() || '';
+  const portValue = dom.turnPortInput?.value;
+  const port = portValue ? Number(portValue) : '';
+  const tlsPortValue = dom.turnTlsPortInput?.value;
+  const tlsPort = tlsPortValue ? Number(tlsPortValue) : '';
+  const username = dom.turnUsernameInput?.value.trim() || '';
+  const password = dom.turnPasswordInput?.value.trim() || '';
+
+  if (enabled) {
+    if (!host || !port) {
+      setTurnStatus('TURN host and port are required when relay is enabled.', 'error');
+      return null;
+    }
+    if (!username || !password) {
+      setTurnStatus('TURN username and password are required when relay is enabled.', 'error');
+      return null;
+    }
+  }
+
+  return {
+    enabled,
+    host,
+    port,
+    tlsPort,
+    username,
+    password
+  };
+}
+
+async function loadRoomConfig(roomName) {
   if (!roomName) return;
   const resp = await emitWithAck('get-room-config', { roomName });
   if (resp?.ok) {
     applyPaymentConfig(resp);
+    applyTurnConfig(resp.turnConfig);
   }
 }
 
@@ -1923,6 +2058,24 @@ if (dom.generateVipCodeBtn) {
 if (dom.vipRequiredToggle) {
   dom.vipRequiredToggle.onclick = () => {
     applyVipRequiredState(!state.vipRequired);
+  };
+}
+
+if (dom.turnSaveBtn) {
+  dom.turnSaveBtn.onclick = () => {
+    if (!state.currentRoom) return;
+    const turnConfig = collectTurnConfigFromInputs();
+    if (!turnConfig) return;
+    socket.emit('update-room-turn', { roomName: state.currentRoom, turnConfig }, (resp) => {
+      if (!resp?.ok) {
+        setTurnStatus(resp?.error || 'Unable to save TURN settings.', 'error');
+        return;
+      }
+      applyTurnConfig(turnConfig);
+      setTurnStatus(
+        turnConfig.enabled ? 'Relay enabled for this room.' : 'Relay disabled for this room.'
+      );
+    });
   };
 }
 
