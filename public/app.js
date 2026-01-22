@@ -118,7 +118,10 @@ const state = {
   overlayImage: new Image(),
   currentRawHTML: '',
   vipUsers: [],
-  vipCodes: []
+  vipCodes: [],
+  paymentEnabled: false,
+  paymentLabel: '',
+  paymentUrl: ''
 };
 
 const viewerPeers = {};
@@ -168,6 +171,11 @@ const dom = {
   vipCodeUses: $('vipCodeUses'),
   vipCodeList: $('vipCodeList'),
   vipStatus: $('vipStatus'),
+  paymentEnableToggle: $('paymentEnableToggle'),
+  paymentLabelInput: $('paymentLabelInput'),
+  paymentUrlInput: $('paymentUrlInput'),
+  paymentSaveBtn: $('paymentSaveBtn'),
+  paymentStatus: $('paymentStatus'),
   btnSendPublic: $('btnSendPublic'),
   inputPublic: $('inputPublic'),
   btnSendPrivate: $('btnSendPrivate'),
@@ -1295,6 +1303,7 @@ async function joinRoomAsHost(room) {
           renderVipCodes();
         }
       });
+      loadPaymentConfig(room);
     } else if (resp?.error) {
       alert(resp.error);
       return;
@@ -1539,6 +1548,40 @@ function setVipStatus(message, tone = 'muted') {
   dom.vipStatus.style.color = tone === 'error' ? 'var(--danger)' : 'var(--muted)';
 }
 
+function setPaymentStatus(message, tone = 'muted') {
+  if (!dom.paymentStatus) return;
+  dom.paymentStatus.textContent = message || '';
+  dom.paymentStatus.style.color = tone === 'error' ? 'var(--danger)' : 'var(--muted)';
+}
+
+function applyPaymentConfig(config) {
+  state.paymentEnabled = !!config.paymentEnabled;
+  state.paymentLabel = config.paymentLabel || '';
+  state.paymentUrl = config.paymentUrl || '';
+
+  if (dom.paymentEnableToggle) {
+    dom.paymentEnableToggle.checked = state.paymentEnabled;
+  }
+  if (dom.paymentLabelInput) {
+    dom.paymentLabelInput.value = state.paymentLabel;
+  }
+  if (dom.paymentUrlInput) {
+    dom.paymentUrlInput.value = state.paymentUrl;
+  }
+}
+
+async function loadPaymentConfig(roomName) {
+  if (!roomName) return;
+  const resp = await emitWithAck('get-room-config', { roomName });
+  if (resp?.ok) {
+    applyPaymentConfig(resp);
+  }
+}
+
+function isValidPaymentUrl(value) {
+  return value.startsWith('http://') || value.startsWith('https://');
+}
+
 function renderVipUsers() {
   if (!dom.vipUserList) return;
   dom.vipUserList.innerHTML = '';
@@ -1607,6 +1650,45 @@ if (dom.generateVipCodeBtn) {
         setVipStatus(resp?.error || 'Unable to generate VIP code.', 'error');
       }
     });
+  };
+}
+
+if (dom.paymentSaveBtn) {
+  dom.paymentSaveBtn.onclick = () => {
+    if (!state.currentRoom) return;
+    if (!state.iAmHost) return;
+
+    const enabled = !!dom.paymentEnableToggle?.checked;
+    const label = dom.paymentLabelInput ? dom.paymentLabelInput.value.trim() : '';
+    const url = dom.paymentUrlInput ? dom.paymentUrlInput.value.trim() : '';
+
+    if (enabled && !label) {
+      setPaymentStatus('Button label is required when payments are enabled.', 'error');
+      return;
+    }
+
+    if (enabled && (!url || !isValidPaymentUrl(url))) {
+      setPaymentStatus('Payment URL must start with http:// or https://.', 'error');
+      return;
+    }
+
+    socket.emit(
+      'update-room-payments',
+      {
+        roomName: state.currentRoom,
+        paymentEnabled: enabled,
+        paymentLabel: label,
+        paymentUrl: url
+      },
+      (resp) => {
+        if (resp?.ok) {
+          applyPaymentConfig({ paymentEnabled: enabled, paymentLabel: label, paymentUrl: url });
+          setPaymentStatus('Payment settings saved.');
+        } else {
+          setPaymentStatus(resp?.error || 'Unable to save payment settings.', 'error');
+        }
+      }
+    );
   };
 }
 
