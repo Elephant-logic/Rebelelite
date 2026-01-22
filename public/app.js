@@ -115,7 +115,9 @@ const state = {
   activeGuestId: null,
   overlayActive: false,
   overlayImage: new Image(),
-  currentRawHTML: ''
+  currentRawHTML: '',
+  vipUsers: [],
+  vipCodes: []
 };
 
 const viewerPeers = {};
@@ -157,6 +159,12 @@ const dom = {
   guestNameInput: $('guestNameInput'),
   guestListPanel: $('guestListPanel'),
   guestListDisplay: $('guestListDisplay'),
+  vipUserInput: $('vipUserInput'),
+  addVipUserBtn: $('addVipUserBtn'),
+  vipUserList: $('vipUserList'),
+  generateVipCodeBtn: $('generateVipCodeBtn'),
+  vipCodeList: $('vipCodeList'),
+  vipStatus: $('vipStatus'),
   btnSendPublic: $('btnSendPublic'),
   inputPublic: $('inputPublic'),
   btnSendPrivate: $('btnSendPrivate'),
@@ -1215,7 +1223,14 @@ if (dom.joinBtn) {
     state.userName = nameInput && nameInput.value.trim() ? nameInput.value.trim() : 'Host';
 
     socket.connect();
-    socket.emit('join-room', { room, name: state.userName, isViewer: false });
+    socket.emit('join-room', { room, name: state.userName, isViewer: false }, (resp) => {
+      if (resp?.isHost) {
+        state.vipUsers = Array.isArray(resp.vipUsers) ? resp.vipUsers : [];
+        state.vipCodes = Array.isArray(resp.vipCodes) ? resp.vipCodes : [];
+        renderVipUsers();
+        renderVipCodes();
+      }
+    });
 
     dom.joinBtn.disabled = true;
     if (dom.leaveBtn) dom.leaveBtn.disabled = false;
@@ -1421,6 +1436,71 @@ function renderGuestList() {
     t.textContent = name;
     dom.guestListDisplay.appendChild(t);
   });
+}
+
+function setVipStatus(message, tone = 'muted') {
+  if (!dom.vipStatus) return;
+  dom.vipStatus.textContent = message || '';
+  dom.vipStatus.style.color = tone === 'error' ? 'var(--danger)' : 'var(--muted)';
+}
+
+function renderVipUsers() {
+  if (!dom.vipUserList) return;
+  dom.vipUserList.innerHTML = '';
+  state.vipUsers.forEach((name) => {
+    const tag = document.createElement('span');
+    tag.style.cssText =
+      'background:rgba(255,255,255,0.1); color:#fff; padding:2px 6px; border-radius:4px; font-size:0.7rem;';
+    tag.textContent = name;
+    dom.vipUserList.appendChild(tag);
+  });
+}
+
+function renderVipCodes() {
+  if (!dom.vipCodeList) return;
+  dom.vipCodeList.innerHTML = '';
+  state.vipCodes.forEach((code) => {
+    const tag = document.createElement('span');
+    tag.style.cssText =
+      'background:var(--accent); color:#000; padding:2px 6px; border-radius:4px; font-size:0.7rem;';
+    tag.textContent = code;
+    dom.vipCodeList.appendChild(tag);
+  });
+}
+
+if (dom.addVipUserBtn) {
+  dom.addVipUserBtn.onclick = () => {
+    if (!dom.vipUserInput || !state.currentRoom) return;
+    const userName = dom.vipUserInput.value.trim();
+    if (!userName) return;
+    socket.emit('add-vip-user', { room: state.currentRoom, userName }, (resp) => {
+      if (resp?.ok) {
+        if (!state.vipUsers.some((u) => u.toLowerCase() === userName.toLowerCase())) {
+          state.vipUsers.push(userName);
+          renderVipUsers();
+        }
+        setVipStatus('VIP user added.');
+        dom.vipUserInput.value = '';
+      } else {
+        setVipStatus(resp?.error || 'Unable to add VIP user.', 'error');
+      }
+    });
+  };
+}
+
+if (dom.generateVipCodeBtn) {
+  dom.generateVipCodeBtn.onclick = () => {
+    if (!state.currentRoom) return;
+    socket.emit('generate-vip-code', { room: state.currentRoom }, (resp) => {
+      if (resp?.ok && resp?.code) {
+        state.vipCodes.push(resp.code);
+        renderVipCodes();
+        setVipStatus('VIP code generated.');
+      } else {
+        setVipStatus(resp?.error || 'Unable to generate VIP code.', 'error');
+      }
+    });
+  };
 }
 
 // ======================================================

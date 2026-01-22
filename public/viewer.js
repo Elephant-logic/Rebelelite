@@ -33,7 +33,8 @@ const state = {
   myName: `Viewer-${Math.floor(Math.random() * 1000)}`,
   callPc: null,
   localCallStream: null,
-  statsInterval: null
+  statsInterval: null,
+  joined: false
 };
 
 // ======================================================
@@ -425,6 +426,11 @@ socket.on('kicked', () => {
 });
 
 socket.on('room-error', (err) => {
+  if (!state.joined) {
+    const status = $('joinStatus');
+    if (status) status.textContent = err || 'Room error';
+    return;
+  }
   alert(err || 'Room error');
   window.location.href = 'index.html';
 });
@@ -453,27 +459,69 @@ window.addEventListener('load', () => {
   const params = new URLSearchParams(window.location.search);
   const room = params.get('room') || 'lobby';
   const nameParam = params.get('name');
+  const vipParam = params.get('vipCode') || params.get('vip');
 
   if (nameParam && nameParam.trim()) {
     state.myName = nameParam.trim().slice(0, 30);
-  } else {
-    const entered = prompt('Enter your display name:', state.myName);
-    if (entered && entered.trim()) {
-      state.myName = entered.trim().slice(0, 30);
-    }
   }
 
   state.currentRoom = room;
 
+  const nameInput = $('viewerNameInput');
+  if (nameInput && state.myName) nameInput.value = state.myName;
+
+  const vipInput = $('viewerVipCodeInput');
+  if (vipInput && vipParam && vipParam.trim()) vipInput.value = vipParam.trim().slice(0, 20);
+
+  const joinPanel = $('viewerJoinPanel');
+  const joinBtn = $('joinRoomBtn');
+  const joinStatus = $('joinStatus');
+
+  const attemptJoin = () => {
+    const chosenName = (nameInput?.value || state.myName || '').trim();
+    if (!chosenName) {
+      if (joinStatus) joinStatus.textContent = 'Please enter a display name.';
+      return;
+    }
+
+    state.myName = chosenName.slice(0, 30);
+    if (joinStatus) joinStatus.textContent = 'Connecting...';
+
+    if (!socket.connected) socket.connect();
+    socket.emit(
+      'join-room',
+      {
+        room,
+        name: state.myName,
+        isViewer: true,
+        vipCode: vipInput?.value.trim()
+      },
+      (resp) => {
+        if (resp?.ok) {
+          state.joined = true;
+          if (joinPanel) joinPanel.classList.add('hidden');
+          if (joinStatus) joinStatus.textContent = '';
+        } else {
+          if (joinStatus) joinStatus.textContent = resp?.error || 'Unable to join room.';
+        }
+      }
+    );
+  };
+
+  if (joinBtn) joinBtn.onclick = attemptJoin;
+  if (nameInput) {
+    nameInput.onkeydown = (e) => {
+      if (e.key === 'Enter') attemptJoin();
+    };
+  }
+  if (vipInput) {
+    vipInput.onkeydown = (e) => {
+      if (e.key === 'Enter') attemptJoin();
+    };
+  }
+
   const nameLabel = $('viewerNameLabel');
   if (nameLabel) nameLabel.textContent = state.myName;
-
-  socket.connect();
-  socket.emit('join-room', {
-    room,
-    name: state.myName,
-    isViewer: true
-  });
 
   const sendBtn = $('sendBtn');
   const chatInput = $('chatInput');
