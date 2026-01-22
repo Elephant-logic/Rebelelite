@@ -1231,10 +1231,14 @@ if (dom.joinBtn) {
 
       const params = new URLSearchParams(window.location.search);
       const authed = params.get('authed') === '1';
-      const cachedPassword = authed ? sessionStorage.getItem(`hostPassword:${room}`) : null;
+      const cachedPassword = sessionStorage.getItem(`hostPassword:${room}`);
+      const cachedAccess = sessionStorage.getItem(`hostAccess:${room}`) === '1';
+      const useCachedPassword = !!(cachedPassword && (authed || cachedAccess));
       const needsPassword = claimedResp?.hasPassword;
       const password = needsPassword
-        ? cachedPassword || window.prompt('Enter host password for this room:') || ''
+        ? (useCachedPassword
+          ? cachedPassword
+          : window.prompt('Enter host password for this room:') || '')
         : '';
 
       if (needsPassword && !password) {
@@ -1252,6 +1256,7 @@ if (dom.joinBtn) {
       socket.emit('auth-host-room', { roomName: room, password }, (authResp) => {
         if (authResp?.ok) {
           sessionStorage.setItem(`hostPassword:${room}`, password);
+          sessionStorage.setItem(`hostAccess:${room}`, '1');
           state.iAmHost = true;
           state.wasHost = true;
           joinAsHost();

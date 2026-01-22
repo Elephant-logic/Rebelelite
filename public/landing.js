@@ -90,6 +90,7 @@ if (claimRoomForm) {
       if (response?.ok) {
         setStatus(claimRoomStatus, 'Room claimed. Redirecting to host studio...', 'ok');
         sessionStorage.setItem(`hostPassword:${name}`, password);
+        sessionStorage.setItem(`hostAccess:${name}`, '1');
         window.location.href = `/index.html?room=${encodeURIComponent(name)}&role=host&authed=1`;
       } else {
         setStatus(claimRoomStatus, response?.error || 'Unable to claim room.', 'error');
@@ -130,6 +131,7 @@ if (hostRoomForm) {
       socket.emit('auth-host-room', { roomName: name, password }, response => {
         if (response?.ok) {
           sessionStorage.setItem(`hostPassword:${name}`, password);
+          sessionStorage.setItem(`hostAccess:${name}`, '1');
           window.location.href = `/index.html?room=${encodeURIComponent(name)}&role=host&authed=1`;
         } else {
           setStatus(hostRoomStatus, response?.error || 'Unable to authenticate room.', 'error');
