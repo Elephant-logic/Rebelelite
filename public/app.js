@@ -105,18 +105,172 @@ let audioContext = null; //
 let audioDestination = null; //
 const audioAnalysers = {}; // NEW: Professional Audio Analysis state
 
-// Canvas for mixing
-let canvas = document.createElement('canvas'); //
-canvas.width = 1920; //
-canvas.height = 1080; //
-let ctx = canvas.getContext('2d'); //
-let canvasStream = null; //
 let mixerLayout = 'SOLO'; //
 let activeGuestId = null; //
 
-let overlayActive = false; //
-let overlayImage = new Image(); //
 let currentRawHTML = ""; //
+
+// ======================================================
+// OVERLAY MODULE (CANVAS-BASED)
+// ======================================================
+// Keeps overlayActive state and exposes drawOverlay(ctx).
+const overlay = {
+    overlayActive: false,
+    overlayImage: new Image(),
+    setActive(value) {
+        this.overlayActive = value; //
+    },
+    setImageSource(src) {
+        this.overlayImage.src = src; //
+        this.overlayActive = true; //
+    },
+    clear() {
+        this.overlayActive = false; //
+        this.overlayImage = new Image(); //
+    },
+    drawOverlay(ctx, width, height) {
+        if (!this.overlayActive || !this.overlayImage.complete) return; //
+        ctx.drawImage(this.overlayImage, 0, 0, width, height); //
+    }
+};
+
+// ======================================================
+// CANVAS MIXER MODULE (CAMERA -> CANVAS -> CAPTURESTREAM)
+// ======================================================
+const mixer = (() => {
+    const canvas = document.createElement('canvas'); //
+    canvas.width = 1920; //
+    canvas.height = 1080; //
+    const ctx = canvas.getContext('2d'); //
+    let stream = null; //
+
+    let lastDrawTime = 0;
+    const fpsInterval = 1000 / 30; // NEW: Target 30 FPS Lock
+
+    function getMixedStream() {
+        if (!stream) {
+            stream = canvas.captureStream(30); //
+        }
+        return stream; //
+    }
+
+    function drawMixer(timestamp) {
+        requestAnimationFrame(drawMixer); //
+
+        const elapsed = timestamp - lastDrawTime; //
+        if (elapsed < fpsInterval) return; //
+        lastDrawTime = timestamp - (elapsed % fpsInterval); //
+
+        if (!ctx) return; //
+
+        ctx.fillStyle = '#000'; //
+        ctx.fillRect(0, 0, canvas.width, canvas.height); //
+
+        const myVideo = $('localVideo'); //
+
+        let guestVideo = null; //
+        if (activeGuestId) {
+            const el = document.getElementById(`vid-${activeGuestId}`); //
+            if (el) guestVideo = el.querySelector('video'); //
+        }
+
+        if (mixerLayout === 'SOLO') {
+            if (myVideo && myVideo.readyState === 4) {
+                ctx.drawImage(myVideo, 0, 0, canvas.width, canvas.height); //
+            }
+        }
+        else if (mixerLayout === 'GUEST') {
+            if (guestVideo && guestVideo.readyState === 4) {
+                ctx.drawImage(guestVideo, 0, 0, canvas.width, canvas.height); //
+            } else {
+                ctx.fillStyle = '#333'; //
+                ctx.fillRect(0, 0, canvas.width, canvas.height); //
+                ctx.fillStyle = '#fff'; //
+                ctx.font = "60px Arial"; //
+                ctx.textAlign = "center"; //
+                ctx.fillText("Waiting for Guest Signal...", canvas.width / 2, canvas.height / 2); //
+            }
+        }
+        else if (mixerLayout === 'SPLIT') {
+            const participants = []; //
+            if (myVideo && myVideo.readyState === 4) {
+                participants.push(myVideo); //
+            }
+
+            Object.keys(callPeers).forEach(id => {
+                const el = document.getElementById(`vid-${id}`); //
+                if (el && el.querySelector('video') && el.querySelector('video').readyState === 4) {
+                    participants.push(el.querySelector('video')); //
+                }
+            });
+
+            const count = participants.length || 1; //
+            const slotW = canvas.width / count; //
+            const aspect = 16 / 9; //
+            const vidH = slotW / aspect; //
+            const yOffset = (canvas.height - vidH) / 2; //
+
+            participants.forEach((vid, i) => {
+                ctx.drawImage(vid, i * slotW, yOffset, slotW, vidH); //
+                if (i > 0) {
+                    ctx.strokeStyle = '#222'; //
+                    ctx.lineWidth = 4; //
+                    ctx.beginPath(); //
+                    ctx.moveTo(i * slotW, 0); //
+                    ctx.lineTo(i * slotW, canvas.height); //
+                    ctx.stroke(); //
+                }
+            });
+        }
+        else if (mixerLayout === 'PIP') {
+            if (myVideo && myVideo.readyState === 4) {
+                ctx.drawImage(myVideo, 0, 0, canvas.width, canvas.height); //
+            }
+            if (guestVideo && guestVideo.readyState === 4) {
+                const pipW = 480, pipH = 270, padding = 30; //
+                const x = canvas.width - pipW - padding; //
+                const y = canvas.height - pipH - padding; //
+                ctx.strokeStyle = "#4af3a3"; //
+                ctx.lineWidth = 5; //
+                ctx.strokeRect(x, y, pipW, pipH); //
+                ctx.drawImage(guestVideo, x, y, pipW, pipH); //
+            }
+        }
+        else if (mixerLayout === 'PIP_INVERTED') {
+            if (guestVideo && guestVideo.readyState === 4) {
+                ctx.drawImage(guestVideo, 0, 0, canvas.width, canvas.height); //
+            } else {
+                ctx.fillStyle = '#111'; //
+                ctx.fillRect(0, 0, canvas.width, canvas.height); //
+            }
+            if (myVideo && myVideo.readyState === 4) {
+                const pipW = 480, pipH = 270, padding = 30; //
+                const x = canvas.width - pipW - padding; //
+                const y = canvas.height - pipH - padding; //
+                ctx.strokeStyle = "#4af3a3"; //
+                ctx.lineWidth = 5; //
+                ctx.strokeRect(x, y, pipW, pipH); //
+                ctx.drawImage(myVideo, x, y, pipW, pipH); //
+            }
+        }
+
+        if (overlay.overlayActive) {
+            overlay.drawOverlay(ctx, canvas.width, canvas.height); //
+        }
+    }
+
+    function start() {
+        getMixedStream(); //
+        requestAnimationFrame(drawMixer); //
+    }
+
+    return {
+        canvas,
+        ctx,
+        start,
+        getMixedStream
+    };
+})();
 
 const viewerPeers = {}; //
 const callPeers = {}; //
@@ -128,115 +282,6 @@ const iceConfig = (typeof ICE_SERVERS !== 'undefined' && ICE_SERVERS.length)
 // ======================================================
 // 3. CANVAS MIXER ENGINE (UPDATED: CPU Optimization)
 // ======================================================
-
-let lastDrawTime = 0;
-const fpsInterval = 1000 / 30; // NEW: Target 30 FPS Lock
-
-function drawMixer(timestamp) {
-    requestAnimationFrame(drawMixer);
-
-    // NEW: Frame Throttling Logic
-    const elapsed = timestamp - lastDrawTime;
-    if (elapsed < fpsInterval) return;
-    lastDrawTime = timestamp - (elapsed % fpsInterval);
-
-    if (!ctx) return; //
-    
-    ctx.fillStyle = '#000'; //
-    ctx.fillRect(0, 0, canvas.width, canvas.height); //
-
-    const myVideo = $('localVideo'); //
-    
-    let guestVideo = null; //
-    if (activeGuestId) {
-        const el = document.getElementById(`vid-${activeGuestId}`); //
-        if (el) guestVideo = el.querySelector('video'); //
-    }
-
-    if (mixerLayout === 'SOLO') {
-        if (myVideo && myVideo.readyState === 4) {
-            ctx.drawImage(myVideo, 0, 0, canvas.width, canvas.height); //
-        }
-    } 
-    else if (mixerLayout === 'GUEST') {
-        if (guestVideo && guestVideo.readyState === 4) {
-            ctx.drawImage(guestVideo, 0, 0, canvas.width, canvas.height); //
-        } else {
-            ctx.fillStyle = '#333'; //
-            ctx.fillRect(0, 0, canvas.width, canvas.height); //
-            ctx.fillStyle = '#fff'; //
-            ctx.font = "60px Arial"; //
-            ctx.textAlign = "center"; //
-            ctx.fillText("Waiting for Guest Signal...", canvas.width / 2, canvas.height / 2); //
-        }
-    } 
-    else if (mixerLayout === 'SPLIT') {
-        const participants = []; //
-        if (myVideo && myVideo.readyState === 4) {
-            participants.push(myVideo); //
-        }
-
-        Object.keys(callPeers).forEach(id => {
-            const el = document.getElementById(`vid-${id}`); //
-            if (el && el.querySelector('video') && el.querySelector('video').readyState === 4) {
-                participants.push(el.querySelector('video')); //
-            }
-        });
-
-        const count = participants.length || 1; //
-        const slotW = canvas.width / count; //
-        const aspect = 16 / 9; //
-        const vidH = slotW / aspect; //
-        const yOffset = (canvas.height - vidH) / 2; //
-
-        participants.forEach((vid, i) => {
-            ctx.drawImage(vid, i * slotW, yOffset, slotW, vidH); //
-            if (i > 0) {
-                ctx.strokeStyle = '#222'; //
-                ctx.lineWidth = 4; //
-                ctx.beginPath(); //
-                ctx.moveTo(i * slotW, 0); //
-                ctx.lineTo(i * slotW, canvas.height); //
-                ctx.stroke(); //
-            }
-        });
-    }
-    else if (mixerLayout === 'PIP') {
-        if (myVideo && myVideo.readyState === 4) {
-            ctx.drawImage(myVideo, 0, 0, canvas.width, canvas.height); //
-        }
-        if (guestVideo && guestVideo.readyState === 4) {
-            const pipW = 480, pipH = 270, padding = 30; //
-            const x = canvas.width - pipW - padding; //
-            const y = canvas.height - pipH - padding; //
-            ctx.strokeStyle = "#4af3a3"; //
-            ctx.lineWidth = 5; //
-            ctx.strokeRect(x, y, pipW, pipH); //
-            ctx.drawImage(guestVideo, x, y, pipW, pipH); //
-        }
-    }
-    else if (mixerLayout === 'PIP_INVERTED') {
-        if (guestVideo && guestVideo.readyState === 4) {
-            ctx.drawImage(guestVideo, 0, 0, canvas.width, canvas.height); //
-        } else {
-            ctx.fillStyle = '#111'; //
-            ctx.fillRect(0, 0, canvas.width, canvas.height); //
-        }
-        if (myVideo && myVideo.readyState === 4) {
-            const pipW = 480, pipH = 270, padding = 30; //
-            const x = canvas.width - pipW - padding; //
-            const y = canvas.height - pipH - padding; //
-            ctx.strokeStyle = "#4af3a3"; //
-            ctx.lineWidth = 5; //
-            ctx.strokeRect(x, y, pipW, pipH); //
-            ctx.drawImage(myVideo, x, y, pipW, pipH); //
-        }
-    }
-
-    if (overlayActive && overlayImage.complete) {
-        ctx.drawImage(overlayImage, 0, 0, canvas.width, canvas.height); //
-    }
-}
 
 // ======================================================
 // AUDIO ANALYSIS HELPERS (NEW PATCH)
@@ -290,8 +335,7 @@ setInterval(async () => {
     }
 }, 2000);
 
-canvasStream = canvas.captureStream(30); //
-requestAnimationFrame(drawMixer); //
+mixer.start(); //
 
 // --- STREAM PREVIEW POPUP (HOST MONITOR) ---
 const previewModal = $('streamPreviewModal'); //
@@ -300,12 +344,9 @@ const previewBtn = $('previewStreamBtn'); //
 const closePreviewBtn = $('closePreviewBtn'); //
 
 function openStreamPreview() {
-    if (!canvasStream) {
-        alert("Stream engine not initialized."); //
-        return;
-    }
+    const mixedStream = mixer.getMixedStream(); //
     if (previewVideo) {
-        previewVideo.srcObject = canvasStream; //
+        previewVideo.srcObject = mixedStream; //
         previewVideo.muted = true; //
         previewVideo.play().catch(() => {}); //
     }
@@ -394,8 +435,9 @@ function renderHTMLLayout(htmlString) {
         </svg>`; //
 
     try {
-        overlayImage.src = 'data:image/svg+xml;base64,' + btoa(unescape(encodeURIComponent(svg))); //
-        overlayActive = true; //
+        overlay.setImageSource(
+            'data:image/svg+xml;base64,' + btoa(unescape(encodeURIComponent(svg)))
+        ); //
     } catch (e) {
         console.error("[Overlay] Failed to encode SVG", e); //
     }
@@ -409,7 +451,7 @@ window.setMixerLayout = (mode) => {
             b.classList.add('active'); //
         }
     });
-    if (overlayActive) renderHTMLLayout(currentRawHTML); //
+    if (overlay.overlayActive) renderHTMLLayout(currentRawHTML); //
 };
 
 window.setActiveGuest = (id) => {
@@ -584,7 +626,8 @@ async function startLocalMedia() {
             localVideo.muted = true; //
         }
 
-        const mixedVideoTrack = canvasStream.getVideoTracks()[0]; //
+        const mixedStream = mixer.getMixedStream(); //
+        const mixedVideoTrack = mixedStream.getVideoTracks()[0]; //
 
         const updateViewerPC = (pc) => {
             if (!pc) return; //
@@ -941,11 +984,12 @@ async function connectViewer(targetId) {
         }
     };
 
-    canvasStream.getTracks().forEach(t => pc.addTrack(t, canvasStream)); //
+    const mixedStream = mixer.getMixedStream(); //
+    mixedStream.getTracks().forEach(t => pc.addTrack(t, mixedStream)); //
 
     if (localStream) {
         const at = localStream.getAudioTracks()[0]; //
-        if (at) pc.addTrack(at, canvasStream); //
+        if (at) pc.addTrack(at, mixedStream); //
     }
 
     if (activeToolboxFile) {
@@ -1105,7 +1149,7 @@ socket.on('room-update', ({ locked, streamTitle, ownerId, users }) => {
     renderUserList(); //
     
     // Auto-update overlay stats when user count changes
-    if (overlayActive) {
+    if (overlay.overlayActive) {
         renderHTMLLayout(currentRawHTML); //
     }
 });
@@ -1142,7 +1186,7 @@ if (updateTitleBtn) {
         const t = streamTitleInput.value.trim(); //
         if (t) {
             socket.emit('update-stream-title', t); //
-            if (overlayActive) renderHTMLLayout(currentRawHTML); //
+            if (overlay.overlayActive) renderHTMLLayout(currentRawHTML); //
         }
     };
 }
@@ -1154,7 +1198,7 @@ if (streamTitleInput) {
             const t = streamTitleInput.value.trim(); //
             if (t) {
                 socket.emit('update-stream-title', t); //
-                if (overlayActive) renderHTMLLayout(currentRawHTML); //
+                if (overlay.overlayActive) renderHTMLLayout(currentRawHTML); //
             }
         }
     };
@@ -1324,7 +1368,7 @@ socket.on('public-chat', d => {
     }
 
     // When public chat updates & overlay is active, re-render layout
-    if (overlayActive) {
+    if (overlay.overlayActive) {
         renderHTMLLayout(currentRawHTML); //
     }
 });
@@ -1471,8 +1515,7 @@ if (htmlOverlayInput) {
 }
 
 window.clearOverlay = () => {
-    overlayActive = false; //
-    overlayImage = new Image(); //
+    overlay.clear(); //
     const overlayStatus = $('overlayStatus'); //
     if (overlayStatus) overlayStatus.textContent = "[Empty]"; //
 };
