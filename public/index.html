@@ -1,0 +1,253 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <title>Rebel Stream</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <link rel="stylesheet" href="style.css" />
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/qrcodejs/1.0.0/qrcode.min.js"></script>
+</head>
+<body>
+  <div class="app-shell">
+    <header class="topbar">
+      <div>
+        <h1 id="headerTitle" class="logo-text">
+            Rebel <span class="logo-highlight">Stream</span>
+        </h1>
+        <p class="subtitle">Secure P2P • Live Stream • Chat • Arcade</p>
+      </div>
+      <div class="status-block">
+        <span id="signalStatus" class="status-dot status-disconnected">Disconnected</span>
+        <span id="roomInfo" class="room-info"></span>
+      </div>
+    </header>
+
+    <main class="layout">
+      <aside class="sidebar">
+        <h2>Connection</h2>
+        <div class="field">
+          <label>Room ID (Secret)</label>
+          <input id="roomInput" type="text" placeholder="e.g. secure-room-99" />
+        </div>
+        <div class="field">
+          <label>Your Name</label>
+          <input id="nameInput" type="text" placeholder="e.g. Host" />
+        </div>
+        <button id="joinBtn" class="btn primary full-width">Join Room</button>
+        <button id="leaveBtn" class="btn full-width" disabled style="margin-top:8px">Leave</button>
+
+        <div id="hostControls" class="host-controls">
+          <h3 style="color:var(--accent); font-size:0.9rem; margin:0 0 10px;">👑 Host Controls</h3>
+          
+          <div class="field">
+            <label>Stream Title</label>
+            <input id="streamTitleInput" class="stream-title-input" type="text" />
+            <button id="updateTitleBtn" class="btn small secondary full-width">Update</button>
+          </div>
+
+          <div class="field" style="margin-top:10px;">
+            <label>Custom Link Name (Slug)</label>
+            <div style="display:flex; gap:5px;">
+              <input id="slugInput" class="stream-title-input" type="text" placeholder="e.g. my-show" />
+              <button id="updateSlugBtn" class="btn small secondary">Set</button>
+            </div>
+          </div>
+
+          <div class="field" style="margin-top:15px; border-top:1px solid var(--border); padding-top:10px;">
+            <label style="color:var(--accent);">🎨 HTML Layout Side-Loader</label>
+            <p style="font-size:0.7rem; color:var(--muted); margin-bottom:5px;">
+              Upload HTML to overlay graphics across all screens.
+            </p>
+            <div style="display:flex; gap:5px;">
+              <label class="btn primary small" style="cursor: pointer; flex:1; text-align: center;">
+                <input id="htmlOverlayInput" type="file" accept=".html" hidden /> 
+                <span>📂 Load Layout</span>
+              </label>
+              <button onclick="clearOverlay()" class="btn danger small">Reset</button>
+            </div>
+            <div id="overlayStatus" style="font-size:0.75rem; color:var(--muted); margin-top:5px; text-align:center;">
+              [No Overlay]
+            </div>
+          </div>
+
+          <div class="field" style="margin-top:15px; border-top:1px solid var(--border); padding-top:10px;">
+            <label style="color:var(--danger);">⛔ VIP / Private Room</label>
+            <div style="display:flex; align-items:center; gap:10px; margin-bottom:10px;">
+                <span style="font-size:0.75rem; color:var(--muted);">Private Mode:</span>
+                <button id="togglePrivateBtn" class="btn small secondary" style="flex:1">OFF</button>
+            </div>
+            <div id="guestListPanel" style="display:none;">
+                <div style="display:flex; gap:5px;">
+                    <input id="guestNameInput" type="text" placeholder="Name (e.g. Dave)" style="font-size:0.8rem; padding:6px;" />
+                    <button id="addGuestBtn" class="btn small primary">+</button>
+                </div>
+                <div id="guestListDisplay" style="margin-top:5px; max-height:80px; overflow-y:auto; display:flex; flex-wrap:wrap; gap:4px;">
+                </div>
+            </div>
+          </div>
+
+          <button id="lockRoomBtn" class="btn full-width" style="margin-top:15px;">🔓 Lock Room</button>
+
+          <div class="field" style="margin-top:20px; border-top:1px solid var(--border); padding-top:10px;">
+            <label style="color:var(--accent);">🕹️ Arcade / Toolbox</label>
+            <p style="font-size:0.7rem; color:var(--muted); margin-bottom:5px;">
+              Load a Game/Tool. Everyone gets it automatically.
+            </p>
+            <label class="btn primary full-width" style="cursor: pointer; text-align: center;">
+              <input id="arcadeInput" type="file" hidden /> 
+              <span>📂 Load to Arcade</span>
+            </label>
+            <div id="arcadeStatus" style="font-size:0.75rem; color:var(--accent); margin-top:5px; text-align:center; min-height:16px;">
+              [Empty]
+            </div>
+          </div>
+        </div>
+      </aside>
+
+      <section class="main-panel">
+        <div id="settingsPanel" class="settings-panel">
+          <h3>Pro Settings</h3>
+          <div class="field">
+            <label>Video Resolution</label>
+            <select id="videoQuality">
+              <option value="ideal" selected>Balanced (720p)</option>
+              <option value="max">Studio (1080p)</option>
+              <option value="low">Speed (360p)</option>
+            </select>
+          </div>
+          <div class="field">
+            <label>Camera Source</label>
+            <select id="videoSource"></select>
+          </div>
+          <div class="field">
+            <label>Primary Audio (Mic)</label>
+            <select id="audioSource"></select>
+          </div>
+          <div class="field">
+            <label>Secondary Audio (Mixer)</label>
+            <select id="audioSource2">
+                <option value="">-- None --</option>
+            </select>
+            <p style="font-size:0.7rem; color:var(--muted);">Combine mic with Loopback/Music.</p>
+          </div>
+          <button id="closeSettingsBtn" class="btn small full-width">Close Settings</button>
+        </div>
+
+        <div class="mixer-controls">
+           <button class="mixer-btn active" onclick="setMixerLayout('SOLO')">👤 Solo</button>
+           <button class="mixer-btn" onclick="setMixerLayout('GUEST')">👤 Guest</button>
+           <button class="mixer-btn" onclick="setMixerLayout('PIP')">🖼️ PiP (Guest Sm)</button>
+           <button class="mixer-btn" onclick="setMixerLayout('PIP_INVERTED')">🔄 Inverted PiP (You Sm)</button>
+           <button class="mixer-btn" onclick="setMixerLayout('SPLIT')">🌗 Split (Dynamic)</button>
+        </div>
+
+        <div id="videoGrid" class="video-grid">
+           <div class="video-container" id="localContainer">
+             <h2>You</h2>
+             <video id="localVideo" autoplay playsinline muted></video>
+           </div>
+        </div>
+
+        <div class="call-controls">
+          <div style="display:flex; gap:5px; border-right:1px solid var(--border); padding-right:10px; margin-right:5px;">
+             <button id="startStreamBtn" class="btn primary">Start Stream</button>
+          </div>
+          <button id="toggleCamBtn" class="btn">Camera Off</button>
+          <button id="toggleMicBtn" class="btn">Mute</button>
+          <button id="settingsBtn" class="btn secondary">⚙️ Settings</button>
+          <button id="shareScreenBtn" class="btn secondary">Share Screen</button>
+          <button id="previewStreamBtn" class="btn secondary">Preview Stream</button>
+          <button id="hangupBtn" class="btn danger" disabled>End Call</button>
+        </div>
+
+        <div class="file-row" style="margin:10px 0; padding:10px; background: var(--panel-soft); border-radius: 8px; display: flex; flex-direction: column; gap: 10px; border: 1px solid var(--border);">
+           <div style="display:flex; align-items:center; gap:10px; width:100%;">
+               <span class="file-label" style="background:var(--panel-soft); border-color:var(--border);">Viewer Link</span>
+               <input id="streamLinkInput" class="file-name" readonly style="flex:1; background:transparent; border:none; color:var(--muted); padding-left:10px;" />
+               <button id="openStreamBtn" class="btn small">Open</button>
+           </div>
+           
+           <div style="display: flex; align-items: center; justify-content: space-between; border-top: 1px solid var(--border); padding-top: 10px;">
+               <div style="font-size: 0.75rem; color: var(--accent); font-weight: bold;">Scan to Share Secure Stream:</div>
+               <div id="qrcode" style="padding:8px; background:#fff; border-radius:4px; box-shadow: 0 0 10px rgba(0,0,0,0.5);"></div>
+           </div>
+        </div>
+
+        <div class="chat-panel">
+          <div class="tabs-header">
+            <button id="tabStreamChat" class="tab-btn active">Stream</button>
+            <button id="tabRoomChat" class="tab-btn">Room</button>
+            <button id="tabFiles" class="tab-btn">Files</button>
+            <button id="tabUsers" class="tab-btn">Users</button>
+          </div>
+
+          <div id="contentStreamChat" class="tab-content active">
+            <div id="chatLogPublic" class="chat-log"></div>
+            <div id="emojiStripPublic" class="emoji-strip">
+              <span class="emoji">😀</span><span class="emoji">😂</span><span class="emoji">👍</span><span class="emoji">🔥</span><span class="emoji">💀</span><span class="emoji">❤️</span>
+            </div>
+            <div class="chat-input-row">
+              <input id="inputPublic" type="text" placeholder="Message Stream (Public)..." />
+              <button id="btnSendPublic" class="btn primary">Send</button>
+            </div>
+          </div>
+
+          <div id="contentRoomChat" class="tab-content">
+            <div id="chatLogPrivate" class="chat-log"></div>
+            <div id="emojiStripPrivate" class="emoji-strip">
+              <span class="emoji">😀</span><span class="emoji">😂</span><span class="emoji">👍</span><span class="emoji">🔥</span><span class="emoji">💀</span><span class="emoji">❤️</span>
+            </div>
+            <div class="chat-input-row">
+              <input id="inputPrivate" type="text" placeholder="Message Room (Private)..." />
+              <button id="btnSendPrivate" class="btn primary">Send</button>
+            </div>
+          </div>
+
+          <div id="contentFiles" class="tab-content">
+             <div class="file-upload-area">
+                <label class="btn secondary" style="flex:1;">
+                  <input id="fileInput" type="file" hidden /> 📎 Choose File
+                </label>
+                <span id="fileNameLabel" style="font-size:0.8rem; margin:0 8px; color:var(--muted); flex:2; overflow:hidden; text-overflow:ellipsis;">No file selected</span>
+                <button id="sendFileBtn" class="btn primary" disabled>Send</button>
+             </div>
+             <div class="files-list">
+                <div id="fileLog" class="file-log"></div>
+             </div>
+          </div>
+
+          <div id="contentUsers" class="tab-content">
+             <h3 style="color:var(--muted); font-size:0.8rem; text-transform:uppercase; letter-spacing:1px;">Active Users</h3>
+             <div id="userList"></div>
+          </div>
+        </div>
+      </section>
+    </main>
+  </div>
+
+  <div id="streamPreviewModal" class="preview-modal">
+    <div class="preview-inner">
+        <div class="preview-header">
+            <span>Stream Preview (What Viewers See)</span>
+            <button id="closePreviewBtn" class="btn small">✕</button>
+        </div>
+        <video id="streamPreviewVideo" autoplay playsinline muted></video>
+    </div>
+  </div>
+  
+  <script src="https://cdn.socket.io/4.8.1/socket.io.min.js"></script>
+  <script src="config/ice.js"></script>
+  <script src="app.js"></script>
+  <script>
+    // AUTO-FILL GUEST LOGIC
+    window.addEventListener('load', () => {
+      const params = new URLSearchParams(window.location.search);
+      if (params.has('room')) document.getElementById('roomInput').value = params.get('room');
+      if (params.has('name')) document.getElementById('nameInput').value = params.get('name');
+      if (params.has('room') && params.has('name')) {
+          setTimeout(() => document.getElementById('joinBtn').click(), 800);
+      }
+    });
+  </script>
+</body>
+</html>
