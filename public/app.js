@@ -106,7 +106,6 @@ const state = {
   latestUserList: [],
   currentOwnerId: null,
   isPrivateMode: false,
-  allowedGuests: [],
   mutedUsers: new Set(),
   localStream: null,
   screenStream: null,
@@ -223,10 +222,6 @@ const dom = {
   slugInput: $('slugInput'),
   publicRoomToggle: $('publicRoomToggle'),
   togglePrivateBtn: $('togglePrivateBtn'),
-  addGuestBtn: $('addGuestBtn'),
-  guestNameInput: $('guestNameInput'),
-  guestListPanel: $('guestListPanel'),
-  guestListDisplay: $('guestListDisplay'),
   vipUserInput: $('vipUserInput'),
   addVipUserBtn: $('addVipUserBtn'),
   vipUserList: $('vipUserList'),
@@ -615,11 +610,14 @@ function resolveOverlaySelector(el, fieldName) {
   if (el?.hasAttribute && el.hasAttribute('data-overlay-field')) {
     return `[data-overlay-field="${escapeOverlaySelector(fieldName)}"]`;
   }
-  if (el?.id && el.id.trim() === fieldName) {
-    return `#${escapeOverlaySelector(fieldName)}`;
+  if (el?.id && el.id.trim()) {
+    return `#${escapeOverlaySelector(el.id.trim())}`;
   }
-  if (el?.classList && el.classList.contains(fieldName)) {
-    return `.${escapeOverlaySelector(fieldName)}`;
+  if (el?.classList && el.classList.length) {
+    const match = Array.from(el.classList).find(
+      (cls) => cls === fieldName || cls.toLowerCase() === fieldName.toLowerCase()
+    );
+    if (match) return `.${escapeOverlaySelector(match)}`;
   }
   return `#${escapeOverlaySelector(fieldName)}`;
 }
@@ -643,11 +641,24 @@ function buildOverlayFieldsFromHTML(htmlString) {
     fields.push({ name, type, selector, initialValue });
   });
 
+  const findKnownElement = (fieldName) => {
+    const escapedName = escapeOverlaySelector(fieldName);
+    const dataMatch = doc.querySelector(`[data-overlay-field="${escapedName}"]`);
+    if (dataMatch) return dataMatch;
+    const directMatch = doc.getElementById(fieldName) || doc.querySelector(`.${escapedName}`);
+    if (directMatch) return directMatch;
+    const lowerName = fieldName.toLowerCase();
+    return Array.from(doc.querySelectorAll('[id], [class]')).find((candidate) => {
+      if (candidate.id && candidate.id.toLowerCase() === lowerName) return true;
+      return Array.from(candidate.classList || []).some(
+        (cls) => cls.toLowerCase() === lowerName
+      );
+    });
+  };
+
   KNOWN_OVERLAY_FIELDS.forEach((name) => {
     if (used.has(name)) return;
-    const escapedName = escapeOverlaySelector(name);
-    const el =
-      doc.getElementById(name) || doc.querySelector(`.${escapedName}`);
+    const el = findKnownElement(name);
     if (!el) return;
     used.add(name);
     const type = getOverlayFieldType(el);
@@ -1839,12 +1850,14 @@ function updateVipActionAvailability() {
   }
 
   if (dom.generateVipCodeBtn) {
-    const canGenerate = ready && state.isPrivateMode;
+    const canGenerate = ready && state.isPrivateMode && state.vipRequired;
     dom.generateVipCodeBtn.disabled = !canGenerate;
     if (!ready) {
       dom.generateVipCodeBtn.title = 'Join a room to generate VIP codes.';
     } else if (!state.isPrivateMode) {
       dom.generateVipCodeBtn.title = 'Turn on Private Room to generate VIP codes.';
+    } else if (!state.vipRequired) {
+      dom.generateVipCodeBtn.title = 'Enable VIP Required to generate VIP codes.';
     } else {
       dom.generateVipCodeBtn.title = '';
     }
@@ -1888,10 +1901,6 @@ function applyPrivacyState(isPrivate, { emitUpdate = true } = {}) {
     dom.publicRoomToggle.checked = !state.isPrivateMode;
   }
 
-  if (dom.guestListPanel) {
-    dom.guestListPanel.style.display = state.isPrivateMode ? 'block' : 'none';
-  }
-
   if (!state.isPrivateMode && state.vipRequired) {
     applyVipRequiredState(false, { emitUpdate });
   }
@@ -1911,16 +1920,6 @@ function applyPrivacyState(isPrivate, { emitUpdate = true } = {}) {
     });
   }
 
-  if (emitUpdate && state.isPrivateMode) {
-    state.latestUserList.forEach((u) => {
-      if (
-        u.id !== state.myId &&
-        !state.allowedGuests.some((g) => g.toLowerCase() === u.name.toLowerCase())
-      ) {
-        socket.emit('kick-user', u.id);
-      }
-    });
-  }
   updatePrivacyControlAvailability();
 }
 
@@ -1958,32 +1957,9 @@ function applyVipRequiredState(isRequired, { emitUpdate = true } = {}) {
       }
     });
   }
+  updateVipActionAvailability();
 }
 
-if (dom.addGuestBtn) {
-  dom.addGuestBtn.onclick = () => {
-    if (!dom.guestNameInput) return;
-    const n = dom.guestNameInput.value.trim();
-    if (n && !state.allowedGuests.includes(n)) {
-      state.allowedGuests.push(n);
-      renderGuestList();
-      dom.guestNameInput.value = '';
-    }
-  };
-}
-
-function renderGuestList() {
-  if (!dom.guestListDisplay) return;
-
-  dom.guestListDisplay.innerHTML = '';
-  state.allowedGuests.forEach((name) => {
-    const t = document.createElement('span');
-    t.style.cssText =
-      'background:var(--accent); color:#000; padding:2px 6px; border-radius:4px; font-size:0.7rem; margin:2px;';
-    t.textContent = name;
-    dom.guestListDisplay.appendChild(t);
-  });
-}
 
 function setVipStatus(message, tone = 'muted') {
   if (!dom.vipStatus) return;
@@ -2156,10 +2132,12 @@ function renderVipCodes() {
     if (typeof entry === 'string') {
       label.textContent = entry;
     } else {
+      const isMultiUse = entry.multiUse || entry.maxUses === null;
       const remaining = Number.isFinite(entry.usesLeft)
         ? entry.usesLeft
         : Math.max(0, (entry.maxUses || 0) - (entry.used || 0));
-      label.textContent = `${entry.code} (${remaining}/${entry.maxUses})`;
+      const usageLabel = isMultiUse ? '∞' : `${remaining}/${entry.maxUses}`;
+      label.textContent = `${entry.code} (${usageLabel})`;
     }
 
     const revokeBtn = document.createElement('button');

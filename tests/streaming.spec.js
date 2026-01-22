@@ -74,7 +74,9 @@ test('viewer private room requires VIP code', async ({ context }) => {
   await expect(hostPage.locator('#togglePrivateBtn')).toHaveText('ON');
   await hostPage.click('#vipRequiredToggle');
   await expect(hostPage.locator('#vipRequiredToggle')).toHaveText('ON');
-  await hostPage.fill('#vipCodeUses', '1');
+  await hostPage.fill('#vipUserInput', 'VIP Viewer');
+  await hostPage.click('#addVipUserBtn');
+  await hostPage.selectOption('#vipCodeUses', '1');
   await hostPage.click('#generateVipCodeBtn');
   const vipCodeEntry = hostPage.locator('#vipCodeList span').first();
   await expect(vipCodeEntry).toHaveText(/\(/);
@@ -85,7 +87,7 @@ test('viewer private room requires VIP code', async ({ context }) => {
   await viewerPage.goto(`/view.html?room=${roomName}`);
   await viewerPage.fill('#viewerNameInput', 'VIP Viewer');
   await viewerPage.click('#joinRoomBtn');
-  await expect(viewerPage.locator('#joinStatus')).toHaveText(/vip code required/i);
+  await expect(viewerPage.locator('#joinStatus')).toHaveText(/vip code/i);
 
   await viewerPage.fill('#viewerVipCodeInput', vipCode);
   await viewerPage.click('#joinRoomBtn');

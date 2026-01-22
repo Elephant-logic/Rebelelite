@@ -124,12 +124,22 @@ function getRoomInfo(roomName) {
 
 function listVipCodes(record) {
   if (!record || !record.vipCodes) return [];
-  return Object.entries(record.vipCodes).map(([code, meta]) => ({
-    code,
-    maxUses: meta.maxUses,
-    usesLeft: meta.usesLeft,
-    used: Math.max(0, meta.maxUses - meta.usesLeft)
-  }));
+  return Object.entries(record.vipCodes).map(([code, meta]) => {
+    const maxUses = meta.maxUses ?? null;
+    const usesLeft = meta.usesLeft ?? null;
+    const used = Number.isFinite(meta.used)
+      ? meta.used
+      : Number.isFinite(maxUses) && Number.isFinite(usesLeft)
+        ? Math.max(0, maxUses - usesLeft)
+        : 0;
+    return {
+      code,
+      maxUses,
+      usesLeft,
+      used,
+      multiUse: !!meta.multiUse
+    };
+  });
 }
 
 function emitVipCodesUpdate(roomName) {
@@ -615,16 +625,29 @@ io.on('connection', (socket) => {
       return;
     }
     const code = generateVipCode(6);
-    const normalizedMaxUses = Number.isFinite(maxUses) ? Math.max(1, Math.floor(maxUses)) : 1;
+    const parsedMaxUses = Number(maxUses);
+    const isMultiUse = !Number.isFinite(parsedMaxUses) || parsedMaxUses <= 0;
+    const normalizedMaxUses = isMultiUse ? null : Math.max(1, Math.floor(parsedMaxUses));
     const result = updateRoomRecord(roomName, (storedRoom) => {
-      storedRoom.vipCodes[code] = { maxUses: normalizedMaxUses, usesLeft: normalizedMaxUses };
+      storedRoom.vipCodes[code] = {
+        maxUses: normalizedMaxUses,
+        usesLeft: normalizedMaxUses,
+        used: 0,
+        multiUse: isMultiUse
+      };
     });
     if (!result.ok) {
       reply({ ok: false, error: result.error });
       return;
     }
     emitVipCodesUpdate(roomName);
-    reply({ ok: true, code, maxUses: normalizedMaxUses, usesLeft: normalizedMaxUses });
+    reply({
+      ok: true,
+      code,
+      maxUses: normalizedMaxUses,
+      usesLeft: normalizedMaxUses,
+      multiUse: isMultiUse
+    });
   });
 
   socket.on('get-vip-codes', ({ roomName, room } = {}, callback) => {
@@ -690,18 +713,24 @@ io.on('connection', (socket) => {
       return;
     }
     const meta = targetRoom.vipCodes[normalized];
-    if (!meta || meta.usesLeft <= 0) {
+    const canUse = !!meta && (meta.multiUse || meta.usesLeft > 0);
+    if (!canUse) {
       reply({ ok: false, reason: 'invalid or exhausted' });
       return;
     }
     let exhausted = false;
     const result = updateRoomRecord(targetRoom.roomName, (storedRoom) => {
       const liveMeta = storedRoom.vipCodes[normalized];
-      if (!liveMeta || liveMeta.usesLeft <= 0) {
+      if (!liveMeta || (!liveMeta.multiUse && liveMeta.usesLeft <= 0)) {
         exhausted = true;
         return;
       }
+      if (liveMeta.multiUse) {
+        liveMeta.used = (liveMeta.used || 0) + 1;
+        return;
+      }
       liveMeta.usesLeft -= 1;
+      liveMeta.used = (liveMeta.used || 0) + 1;
     });
     if (!result.ok) {
       reply({ ok: false, reason: 'invalid or exhausted' });
@@ -782,40 +811,42 @@ io.on('connection', (socket) => {
     }
 
     // VIP access rules:
-    // - VIP token/code grants access to private rooms.
-    // - VIP codes are usage-tracked with maxUses/used.
+    // - VIP username list controls private access.
+    // - VIP codes are only required when VIP Required is enabled.
     const vipRooms = socket.data.vipRooms;
-    const vipTokenAccepted = vipToken ? consumeVipToken(vipToken, roomName) : false;
-    if (vipTokenAccepted) {
-      if (!socket.data.vipRooms) socket.data.vipRooms = new Set();
-      socket.data.vipRooms.add(roomName);
-    }
 
     const privacy = directoryEntry ? directoryEntry.privacy : 'public';
-    const vipRequired = directoryEntry ? !!directoryEntry.vipRequired : false;
-    const vipGate = privacy === 'private' && vipRequired;
+    const isPrivate = privacy === 'private';
+    const vipRequired = isPrivate ? !!directoryEntry.vipRequired : false;
+    const vipGate = isPrivate && vipRequired;
 
     const vipByName =
       viewerMode &&
-      vipGate &&
+      isPrivate &&
       Array.isArray(directoryEntry?.vipUsers) &&
       directoryEntry.vipUsers.some(
         (user) => String(user).trim().toLowerCase() === displayName.toLowerCase()
       );
 
     let vipByCode = false;
-    if (viewerMode && vipGate && vipCode && directoryEntry?.vipCodes) {
+    if (viewerMode && vipGate && vipByName && vipCode && directoryEntry?.vipCodes) {
       const normalized = normalizeVipCode(vipCode);
       const meta = normalized ? directoryEntry.vipCodes[normalized] : null;
-      if (meta && meta.usesLeft > 0) {
+      const canUse = !!meta && (meta.multiUse || meta.usesLeft > 0);
+      if (canUse) {
         let exhausted = false;
         const result = updateRoomRecord(roomName, (storedRoom) => {
           const liveMeta = storedRoom.vipCodes[normalized];
-          if (!liveMeta || liveMeta.usesLeft <= 0) {
+          if (!liveMeta || (!liveMeta.multiUse && liveMeta.usesLeft <= 0)) {
             exhausted = true;
             return;
           }
+          if (liveMeta.multiUse) {
+            liveMeta.used = (liveMeta.used || 0) + 1;
+            return;
+          }
           liveMeta.usesLeft -= 1;
+          liveMeta.used = (liveMeta.used || 0) + 1;
         });
         if (result.ok && !exhausted) {
           vipByCode = true;
@@ -824,11 +855,26 @@ io.on('connection', (socket) => {
       }
     }
 
-    const isVip =
-      viewerMode &&
-      (vipByName || vipByCode || (vipRooms && vipRooms.has(roomName)) || vipTokenAccepted);
+    let vipTokenAccepted = false;
+    if (viewerMode && vipGate && vipByName && vipToken) {
+      vipTokenAccepted = consumeVipToken(vipToken, roomName);
+      if (vipTokenAccepted) {
+        if (!socket.data.vipRooms) socket.data.vipRooms = new Set();
+        socket.data.vipRooms.add(roomName);
+      }
+    }
 
-    if (viewerMode && vipGate && !isVip) {
+    const hasVipToken =
+      vipGate && vipByName && (vipTokenAccepted || (vipRooms && vipRooms.has(roomName)));
+
+    const isVip = viewerMode && isPrivate && vipByName && (!vipGate || vipByCode || hasVipToken);
+
+    if (viewerMode && isPrivate && !vipByName) {
+      reply({ ok: false, error: 'VIP username required.' });
+      return;
+    }
+
+    if (viewerMode && vipGate && !vipByCode && !hasVipToken) {
       reply({ ok: false, error: vipCode ? 'Invalid or exhausted VIP code.' : 'VIP code required.' });
       return;
     }
