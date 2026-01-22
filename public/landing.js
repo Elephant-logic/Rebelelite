@@ -108,7 +108,7 @@ if (hostRoomForm) {
     setStatus(hostRoomStatus, 'Checking room ownership...', '');
     socket.emit('auth-host-room', { name, password }, response => {
       if (response?.ok) {
-        window.location.href = `/index.html?room=${encodeURIComponent(name)}`;
+        window.location.href = `/index.html?room=${encodeURIComponent(name)}&role=host`;
       } else {
         setStatus(hostRoomStatus, response?.error || 'Unable to authenticate room.', 'error');
       }

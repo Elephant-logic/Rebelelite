@@ -175,6 +175,26 @@ const dom = {
   openStreamBtn: $('openStreamBtn')
 };
 
+function applyRoomQueryDefaults() {
+  const params = new URLSearchParams(window.location.search);
+  const roomParam = params.get('room');
+  const roleParam = params.get('role');
+  const roomValue = roomParam ? roomParam.trim() : '';
+
+  if (roomValue) {
+    const roomInput = $('roomInput');
+    if (roomInput) roomInput.value = roomValue;
+    state.currentRoom = roomValue;
+  }
+
+  if (roleParam === 'host') {
+    state.iAmHost = true;
+    state.wasHost = true;
+  }
+}
+
+window.addEventListener('load', applyRoomQueryDefaults);
+
 // ======================================================
 // CANVAS MIXER MODULE (CAMERA -> CANVAS -> CAPTURESTREAM)
 // ======================================================
@@ -842,7 +862,7 @@ function updateStreamButton(isLive) {
  * PeerConnection impact: closes all viewer PeerConnections.
  */
 function stopStream() {
-    isStreaming = false; //
+    state.isStreaming = false; //
     updateStreamButton(false); //
 
     Object.values(viewerPeers).forEach(pc => pc.close()); //
@@ -858,13 +878,13 @@ function stopStream() {
  * PeerConnection impact: creates viewer PeerConnections and sends offers.
  */
 async function startStream() {
-    if (!currentRoom || !iAmHost) return; //
+    if (!state.currentRoom || !state.iAmHost) return; //
 
   if (!state.localStream) {
     await startLocalMedia();
   }
 
-    isStreaming = true; //
+    state.isStreaming = true; //
     updateStreamButton(true); //
 
   state.latestUserList.forEach((u) => {
@@ -877,11 +897,11 @@ async function startStream() {
 const startStreamBtn = $('startStreamBtn'); //
 if (startStreamBtn) {
     startStreamBtn.onclick = async () => {
-        if (!currentRoom || !iAmHost) {
+        if (!state.currentRoom || !state.iAmHost) {
             alert("Host only."); //
             return;
         }
-        if (isStreaming) {
+        if (state.isStreaming) {
             stopStream(); //
         } else {
             await startStream(); //
