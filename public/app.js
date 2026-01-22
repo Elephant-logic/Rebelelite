@@ -125,7 +125,7 @@ const state = {
   overlayRenderCount: 0,
   vipUsers: [],
   vipCodes: [],
-  vipRequired: true,
+  vipRequired: false,
   turnConfig: {
     enabled: false,
     host: '',
@@ -1787,6 +1787,33 @@ function canUpdateRoomSettings() {
   return !!(state.currentRoom && state.joined && socket.connected);
 }
 
+function updateVipActionAvailability() {
+  const ready = canUpdateRoomSettings();
+  const vipName = dom.vipUserInput?.value.trim() || '';
+  if (dom.addVipUserBtn) {
+    dom.addVipUserBtn.disabled = !ready || !vipName;
+    if (!ready) {
+      dom.addVipUserBtn.title = 'Join a room to add VIP users.';
+    } else if (!vipName) {
+      dom.addVipUserBtn.title = 'Enter a VIP username first.';
+    } else {
+      dom.addVipUserBtn.title = '';
+    }
+  }
+
+  if (dom.generateVipCodeBtn) {
+    const canGenerate = ready && state.isPrivateMode;
+    dom.generateVipCodeBtn.disabled = !canGenerate;
+    if (!ready) {
+      dom.generateVipCodeBtn.title = 'Join a room to generate VIP codes.';
+    } else if (!state.isPrivateMode) {
+      dom.generateVipCodeBtn.title = 'Turn on Private Room to generate VIP codes.';
+    } else {
+      dom.generateVipCodeBtn.title = '';
+    }
+  }
+}
+
 function updatePrivacyControlAvailability() {
   const ready = canUpdateRoomSettings();
   if (dom.togglePrivateBtn) {
@@ -1801,6 +1828,7 @@ function updatePrivacyControlAvailability() {
     dom.vipRequiredToggle.disabled = !ready;
     dom.vipRequiredToggle.title = ready ? '' : 'Join a room to change VIP access.';
   }
+  updateVipActionAvailability();
 }
 
 function applyPrivacyState(isPrivate, { emitUpdate = true } = {}) {
@@ -1838,6 +1866,7 @@ function applyPrivacyState(isPrivate, { emitUpdate = true } = {}) {
       }
     });
   }
+  updateVipActionAvailability();
 }
 
 function applyVipRequiredState(isRequired, { emitUpdate = true } = {}) {
@@ -1990,6 +2019,44 @@ function isValidPaymentUrl(value) {
   return value.startsWith('http://') || value.startsWith('https://');
 }
 
+if (dom.paymentSaveBtn) {
+  dom.paymentSaveBtn.onclick = () => {
+    if (!state.currentRoom) {
+      setPaymentStatus('Join a room to save payment settings.', 'error');
+      return;
+    }
+
+    const enabled = !!dom.paymentEnableToggle?.checked;
+    const label = dom.paymentLabelInput?.value.trim() || '';
+    const url = dom.paymentUrlInput?.value.trim() || '';
+
+    if (url && !isValidPaymentUrl(url)) {
+      setPaymentStatus('Payment URL must start with http(s).', 'error');
+      return;
+    }
+
+    socket.emit(
+      'update-room-payments',
+      {
+        roomName: state.currentRoom,
+        paymentEnabled: enabled,
+        paymentLabel: label,
+        paymentUrl: url
+      },
+      (resp) => {
+        if (resp?.ok) {
+          state.paymentEnabled = enabled;
+          state.paymentLabel = label;
+          state.paymentUrl = url;
+          setPaymentStatus('Payment settings saved.');
+        } else {
+          setPaymentStatus(resp?.error || 'Unable to save payment settings.', 'error');
+        }
+      }
+    );
+  };
+}
+
 function renderVipUsers() {
   if (!dom.vipUserList) return;
   dom.vipUserList.innerHTML = '';
@@ -2055,11 +2122,18 @@ if (dom.addVipUserBtn) {
         }
         setVipStatus('VIP user added.');
         dom.vipUserInput.value = '';
+        updateVipActionAvailability();
       } else {
         setVipStatus(resp?.error || 'Unable to add VIP user.', 'error');
       }
     });
   };
+}
+
+if (dom.vipUserInput) {
+  dom.vipUserInput.addEventListener('input', () => {
+    updateVipActionAvailability();
+  });
 }
 
 if (dom.generateVipCodeBtn) {

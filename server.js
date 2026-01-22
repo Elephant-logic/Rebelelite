@@ -51,7 +51,7 @@ function buildRoomRecord({ roomName, ownerPassword, privacy }) {
     ownerPassword: ownerPassword ? String(ownerPassword) : null,
     privacy: privacy === 'private' ? 'private' : 'public',
     isLive: false,
-    vipRequired: true,
+    vipRequired: false,
     vipCodes: {},
     createdAt: Date.now(),
     title: null,
@@ -259,7 +259,7 @@ function broadcastRoomUpdate(roomName) {
     locked: room.locked,
     streamTitle: room.streamTitle,
     privacy: record ? record.privacy : 'public',
-    vipRequired: record ? !!record.vipRequired : true
+    vipRequired: record ? !!record.vipRequired : false
   });
 }
 
@@ -351,7 +351,7 @@ io.on('connection', (socket) => {
       exists: !!record,
       privacy: record ? record.privacy : 'public',
       hasOwnerPassword: !!(record && record.ownerPassword),
-      vipRequired: record ? !!record.vipRequired : true
+      vipRequired: record ? !!record.vipRequired : false
     });
   });
 
@@ -774,7 +774,7 @@ io.on('connection', (socket) => {
 
     const isVip =
       viewerMode && (vipByCode || (vipRooms && vipRooms.has(roomName)) || vipTokenAccepted);
-    const vipRequired = directoryEntry ? directoryEntry.vipRequired !== false : true;
+    const vipRequired = directoryEntry ? !!directoryEntry.vipRequired : false;
 
     if (viewerMode && directoryEntry?.privacy === 'private' && vipRequired && !isVip) {
       reply({ ok: false, error: vipCode ? 'Invalid or exhausted VIP code.' : 'VIP code required.' });
