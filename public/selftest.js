@@ -18,7 +18,8 @@ const context = {
   viewerSocket: null,
   broadcastOrder: [],
   callOrder: [],
-  viewerIsViewer: false
+  viewerIsViewer: false,
+  studioReady: false
 };
 
 const iceConfig =
@@ -130,6 +131,110 @@ function ensureStudioFrameLoaded() {
   return studioFrameLoaded;
 }
 
+async function ensureStudioHostJoined() {
+  if (context.studioReady) return studioFrame?.contentWindow?.document;
+  await ensureStudioFrameLoaded();
+  const doc = await waitForFrameElements(
+    studioFrame,
+    ['roomInput', 'nameInput', 'joinBtn', 'togglePrivateBtn', 'vipRequiredToggle', 'leaveBtn'],
+    8000
+  );
+  const frameWindow = studioFrame.contentWindow;
+  if (!frameWindow) throw new Error('Studio iframe missing');
+  frameWindow.sessionStorage.setItem(`hostPassword:${context.roomName}`, context.password);
+  frameWindow.sessionStorage.setItem(`hostAccess:${context.roomName}`, '1');
+
+  const roomInput = doc.getElementById('roomInput');
+  const nameInput = doc.getElementById('nameInput');
+  const joinBtn = doc.getElementById('joinBtn');
+
+  roomInput.value = context.roomName;
+  nameInput.value = 'SelfTest Studio Host';
+  joinBtn.click();
+
+  await withTimeout(
+    new Promise((resolve, reject) => {
+      const start = Date.now();
+      const interval = setInterval(() => {
+        const leaveBtn = doc.getElementById('leaveBtn');
+        const privateBtn = doc.getElementById('togglePrivateBtn');
+        const vipBtn = doc.getElementById('vipRequiredToggle');
+        if (
+          leaveBtn &&
+          privateBtn &&
+          vipBtn &&
+          !leaveBtn.disabled &&
+          !privateBtn.disabled &&
+          !vipBtn.disabled
+        ) {
+          clearInterval(interval);
+          resolve();
+        } else if (Date.now() - start > 8000) {
+          clearInterval(interval);
+          reject(new Error('Studio host did not finish joining'));
+        }
+      }, 200);
+    }),
+    9000,
+    'Studio host join'
+  );
+
+  context.studioReady = true;
+  return doc;
+}
+
+async function setStudioToggle(doc, id, expected) {
+  const btn = doc.getElementById(id);
+  if (!btn) throw new Error(`Missing toggle ${id}`);
+  if (btn.textContent.trim() !== expected) {
+    btn.click();
+  }
+  await withTimeout(
+    new Promise((resolve, reject) => {
+      const start = Date.now();
+      const interval = setInterval(() => {
+        if (btn.textContent.trim() === expected) {
+          clearInterval(interval);
+          resolve();
+        } else if (Date.now() - start > 4000) {
+          clearInterval(interval);
+          reject(new Error(`Toggle ${id} did not reach ${expected}`));
+        }
+      }, 150);
+    }),
+    4500,
+    `Toggle ${id}`
+  );
+}
+
+async function waitForRoomInfo(expected) {
+  if (!context.hostSocket) throw new Error('Host socket not initialized');
+  return withTimeout(
+    new Promise((resolve, reject) => {
+      const start = Date.now();
+      const interval = setInterval(async () => {
+        const info = await emitWithAck(context.hostSocket, 'get-room-info', {
+          roomName: context.roomName
+        });
+        const matches = Object.entries(expected).every(([key, value]) => info?.[key] === value);
+        if (matches) {
+          clearInterval(interval);
+          resolve(info);
+        } else if (Date.now() - start > 4000) {
+          clearInterval(interval);
+          reject(
+            new Error(
+              `Room info mismatch (expected ${JSON.stringify(expected)}, got ${JSON.stringify(info)})`
+            )
+          );
+        }
+      }, 200);
+    }),
+    4500,
+    'Room info update'
+  );
+}
+
 function emitWithAck(socket, event, payload, ms = 5000) {
   return withTimeout(
     new Promise((resolve) => {
@@ -191,9 +296,13 @@ async function testClaimRoom() {
     password: context.password,
     public: true
   });
+  const info = await emitWithAck(socket, 'get-room-info', { roomName: context.roomName });
   socket.disconnect();
   if (!resp?.ok) throw new Error(resp?.error || 'Claim failed');
-  return 'Room claimed successfully.';
+  if (!info?.exists || info?.privacy !== 'public') {
+    throw new Error('Room was not registered as public after claim');
+  }
+  return 'Room claimed successfully as public.';
 }
 
 async function testHostReenter() {
@@ -244,6 +353,10 @@ async function testHostStudioAutoEntry() {
 
 async function testPublicViewerJoinAndBroadcast() {
   if (!context.hostSocket) throw new Error('Host socket not initialized');
+  const doc = await ensureStudioHostJoined();
+  await setStudioToggle(doc, 'togglePrivateBtn', 'OFF');
+  await setStudioToggle(doc, 'vipRequiredToggle', 'OFF');
+  await waitForRoomInfo({ privacy: 'public', vipRequired: false });
 
   const viewerSocket = io({ autoConnect: false });
   context.viewerSocket = viewerSocket;
@@ -372,14 +485,10 @@ async function testPublicViewerJoinAndBroadcast() {
 
 async function testPrivateViewerBlocked() {
   if (!context.hostSocket) throw new Error('Host socket not initialized');
-  await emitWithAck(context.hostSocket, 'update-room-privacy', {
-    name: context.roomName,
-    privacy: 'private'
-  });
-  await emitWithAck(context.hostSocket, 'update-vip-required', {
-    roomName: context.roomName,
-    vipRequired: false
-  });
+  const doc = await ensureStudioHostJoined();
+  await setStudioToggle(doc, 'togglePrivateBtn', 'ON');
+  await setStudioToggle(doc, 'vipRequiredToggle', 'OFF');
+  await waitForRoomInfo({ privacy: 'private', vipRequired: false });
 
   const openSocket = io({ autoConnect: false });
   await connectSocket(openSocket);
@@ -395,10 +504,10 @@ async function testPrivateViewerBlocked() {
 
 async function testPrivateVipRequiredBlocked() {
   if (!context.hostSocket) throw new Error('Host socket not initialized');
-  await emitWithAck(context.hostSocket, 'update-vip-required', {
-    roomName: context.roomName,
-    vipRequired: true
-  });
+  const doc = await ensureStudioHostJoined();
+  await setStudioToggle(doc, 'togglePrivateBtn', 'ON');
+  await setStudioToggle(doc, 'vipRequiredToggle', 'ON');
+  await waitForRoomInfo({ privacy: 'private', vipRequired: true });
 
   const blockedSocket = io({ autoConnect: false });
   await connectSocket(blockedSocket);
@@ -412,8 +521,21 @@ async function testPrivateVipRequiredBlocked() {
   return 'Private room blocked non-VIP viewer with VIP required.';
 }
 
+async function testPrivateRoomToggleOff() {
+  if (!context.hostSocket) throw new Error('Host socket not initialized');
+  const doc = await ensureStudioHostJoined();
+  await setStudioToggle(doc, 'togglePrivateBtn', 'OFF');
+  await setStudioToggle(doc, 'vipRequiredToggle', 'OFF');
+  await waitForRoomInfo({ privacy: 'public', vipRequired: false });
+  return 'Private room toggled off and returned to public.';
+}
+
 async function testVipViewerJoinAndUsage() {
   if (!context.hostSocket) throw new Error('Host socket not initialized');
+  const doc = await ensureStudioHostJoined();
+  await setStudioToggle(doc, 'togglePrivateBtn', 'ON');
+  await setStudioToggle(doc, 'vipRequiredToggle', 'ON');
+  await waitForRoomInfo({ privacy: 'private', vipRequired: true });
   const codeResp = await emitWithAck(context.hostSocket, 'generate-vip-code', {
     room: context.roomName,
     maxUses: 1
@@ -722,7 +844,7 @@ async function run() {
 
   const tests = [
     {
-      name: 'Host can create/claim a room',
+      name: 'Host can create/claim a public room',
       run: testClaimRoom
     },
     {
@@ -734,16 +856,20 @@ async function run() {
       run: testHostStudioAutoEntry
     },
     {
-      name: 'Public viewers join without VIP and receive broadcast tracks',
+      name: 'Public viewers can join when Private Room and VIP Required are off',
       run: testPublicViewerJoinAndBroadcast
     },
     {
-      name: 'Private room allows viewers when VIP is off',
+      name: 'Host can turn Private Room on; viewers join when VIP is off',
       run: testPrivateViewerBlocked
     },
     {
       name: 'Private room blocks viewers when VIP is required',
       run: testPrivateVipRequiredBlocked
+    },
+    {
+      name: 'Host can turn Private Room off and return to public',
+      run: testPrivateRoomToggleOff
     },
     {
       name: 'VIP viewers can join with code and decrements usage',

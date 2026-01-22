@@ -1502,6 +1502,7 @@ socket.on('connect', () => {
     signalStatus.textContent = 'Connected';
   }
   state.myId = socket.id;
+  updatePrivacyControlAvailability();
 });
 
 socket.on('disconnect', () => {
@@ -1510,6 +1511,7 @@ socket.on('disconnect', () => {
     signalStatus.className = 'status-dot status-disconnected';
     signalStatus.textContent = 'Disconnected';
   }
+  updatePrivacyControlAvailability();
 });
 
 function emitWithAck(eventName, payload) {
@@ -1598,6 +1600,7 @@ async function joinRoomAsHost(room) {
       return;
     }
     state.joined = true;
+    updatePrivacyControlAvailability();
   });
 
   if (dom.leaveBtn) dom.leaveBtn.disabled = false;
@@ -1780,6 +1783,26 @@ if (dom.slugInput) {
   };
 }
 
+function canUpdateRoomSettings() {
+  return !!(state.currentRoom && state.joined && socket.connected);
+}
+
+function updatePrivacyControlAvailability() {
+  const ready = canUpdateRoomSettings();
+  if (dom.togglePrivateBtn) {
+    dom.togglePrivateBtn.disabled = !ready;
+    dom.togglePrivateBtn.title = ready ? '' : 'Join a room to change privacy.';
+  }
+  if (dom.publicRoomToggle) {
+    dom.publicRoomToggle.disabled = !ready;
+    dom.publicRoomToggle.title = ready ? '' : 'Join a room to change privacy.';
+  }
+  if (dom.vipRequiredToggle) {
+    dom.vipRequiredToggle.disabled = !ready;
+    dom.vipRequiredToggle.title = ready ? '' : 'Join a room to change VIP access.';
+  }
+}
+
 function applyPrivacyState(isPrivate, { emitUpdate = true } = {}) {
   state.isPrivateMode = !!isPrivate;
 
@@ -1792,6 +1815,10 @@ function applyPrivacyState(isPrivate, { emitUpdate = true } = {}) {
 
   if (dom.publicRoomToggle) {
     dom.publicRoomToggle.checked = !state.isPrivateMode;
+  }
+
+  if (dom.guestListPanel) {
+    dom.guestListPanel.style.display = state.isPrivateMode ? 'block' : 'none';
   }
 
   if (emitUpdate && state.currentRoom) {
@@ -2055,8 +2082,33 @@ if (dom.generateVipCodeBtn) {
   };
 }
 
+if (dom.togglePrivateBtn) {
+  dom.togglePrivateBtn.onclick = () => {
+    if (!canUpdateRoomSettings()) {
+      setVipStatus('Join a room to change privacy.', 'error');
+      return;
+    }
+    applyPrivacyState(!state.isPrivateMode);
+  };
+}
+
+if (dom.publicRoomToggle) {
+  dom.publicRoomToggle.onchange = () => {
+    if (!canUpdateRoomSettings()) {
+      setVipStatus('Join a room to change privacy.', 'error');
+      dom.publicRoomToggle.checked = !state.isPrivateMode;
+      return;
+    }
+    applyPrivacyState(!dom.publicRoomToggle.checked);
+  };
+}
+
 if (dom.vipRequiredToggle) {
   dom.vipRequiredToggle.onclick = () => {
+    if (!canUpdateRoomSettings()) {
+      setVipStatus('Join a room to change VIP access.', 'error');
+      return;
+    }
     applyVipRequiredState(!state.vipRequired);
   };
 }
@@ -2496,6 +2548,8 @@ if (dom.openStreamBtn) {
     if (u) window.open(u, '_blank');
   };
 }
+
+updatePrivacyControlAvailability();
 
 // ======================================================
 // HELPER / GUIDE (Developer Notes)
