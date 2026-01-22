@@ -59,7 +59,15 @@ function buildRoomRecord({ roomName, ownerPassword, privacy }) {
     vipUsers: [],
     paymentEnabled: false,
     paymentLabel: '',
-    paymentUrl: ''
+    paymentUrl: '',
+    turnConfig: {
+      enabled: false,
+      host: '',
+      port: '',
+      tlsPort: '',
+      username: '',
+      password: ''
+    }
   };
 }
 
@@ -200,6 +208,46 @@ function isValidPaymentUrl(value) {
   return typeof value === 'string' && (value.startsWith('http://') || value.startsWith('https://'));
 }
 
+function normalizeTurnConfig(config = {}) {
+  const enabled = !!config.enabled;
+  const host = typeof config.host === 'string' ? config.host.trim() : '';
+  const port = Number(config.port);
+  const tlsPort = config.tlsPort ? Number(config.tlsPort) : '';
+  const username = typeof config.username === 'string' ? config.username.trim() : '';
+  const password = typeof config.password === 'string' ? config.password.trim() : '';
+  return {
+    enabled,
+    host,
+    port: Number.isFinite(port) ? port : '',
+    tlsPort: Number.isFinite(tlsPort) ? tlsPort : '',
+    username,
+    password
+  };
+}
+
+function isValidTurnConfig(config) {
+  if (!config || !config.enabled) return false;
+  if (!config.host || !config.port) return false;
+  if (!config.username || !config.password) return false;
+  return true;
+}
+
+function sanitizeTurnConfig(config) {
+  const normalized = normalizeTurnConfig(config);
+  if (!normalized.enabled) {
+    return {
+      enabled: false,
+      host: '',
+      port: '',
+      tlsPort: '',
+      username: '',
+      password: ''
+    };
+  }
+  if (!isValidTurnConfig(normalized)) return null;
+  return normalized;
+}
+
 function broadcastRoomUpdate(roomName) {
   const room = rooms[roomName];
   if (!room) return;
@@ -304,6 +352,29 @@ io.on('connection', (socket) => {
       privacy: record ? record.privacy : 'public',
       hasOwnerPassword: !!(record && record.ownerPassword),
       vipRequired: record ? !!record.vipRequired : true
+    });
+  });
+
+  socket.on('get-room-config', ({ roomName } = {}, callback) => {
+    const reply = typeof callback === 'function' ? callback : () => {};
+    const record = getRoomRecord(roomName);
+    if (!record) {
+      reply({ ok: false, error: 'Room not found.' });
+      return;
+    }
+    reply({
+      ok: true,
+      paymentEnabled: !!record.paymentEnabled,
+      paymentLabel: record.paymentLabel || '',
+      paymentUrl: record.paymentUrl || '',
+      turnConfig: record.turnConfig || {
+        enabled: false,
+        host: '',
+        port: '',
+        tlsPort: '',
+        username: '',
+        password: ''
+      }
     });
   });
 
@@ -435,6 +506,32 @@ io.on('connection', (socket) => {
       room.paymentEnabled = enabled;
       room.paymentLabel = normalizedLabel;
       room.paymentUrl = normalizedUrl;
+    });
+
+    reply(result.ok ? { ok: true } : { ok: false, error: result.error });
+  });
+
+  socket.on('update-room-turn', ({ roomName, turnConfig } = {}, callback) => {
+    const reply = typeof callback === 'function' ? callback : () => {};
+    const targetName = normalizeRoomName(roomName);
+    if (!targetName) {
+      reply({ ok: false, error: 'Room name is required.' });
+      return;
+    }
+    const info = rooms[targetName];
+    if (!requireOwner(info, socket)) {
+      reply({ ok: false, error: 'Only the host can update TURN settings.' });
+      return;
+    }
+
+    const sanitized = sanitizeTurnConfig(turnConfig);
+    if (!sanitized) {
+      reply({ ok: false, error: 'TURN host, port, username, and password are required.' });
+      return;
+    }
+
+    const result = updateRoomRecord(targetName, (room) => {
+      room.turnConfig = sanitized;
     });
 
     reply(result.ok ? { ok: true } : { ok: false, error: result.error });
