@@ -43,6 +43,37 @@ input[type="text"] {
   color: #fff; padding: 12px; border-radius: var(--radius-sm); outline: none; transition: 0.2s; font-size: 1rem;
 }
 input:focus { border-color: var(--accent); box-shadow: 0 0 0 2px rgba(74,243,163,0.1); }
+textarea {
+  width: 100%; background: var(--panel); border: 1px solid var(--border);
+  color: #fff; padding: 10px; border-radius: var(--radius-sm); outline: none; transition: 0.2s; font-size: 0.9rem;
+}
+textarea:focus { border-color: var(--accent); box-shadow: 0 0 0 2px rgba(74,243,163,0.1); }
+
+.overlay-fields {
+  margin-top: 8px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.overlay-field {
+  background: var(--panel-soft);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  padding: 8px;
+}
+
+.overlay-field label {
+  font-size: 0.75rem;
+  margin-bottom: 6px;
+  color: var(--text);
+}
+
+.overlay-field textarea {
+  min-height: 80px;
+  resize: vertical;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
+}
 
 /* Buttons */
 .btn {
