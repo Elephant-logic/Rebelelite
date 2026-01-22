@@ -512,7 +512,8 @@ socket.on('room-error', (err) => {
 // ======================================================
 function sendChat() {
   const input = $('chatInput');
-  if (!input || !state.currentRoom) return;
+  if (!input || !state.currentRoom || !state.joined) return;
+  if (!socket.connected) socket.connect();
 
   const text = input.value.trim();
   if (!text) return;

@@ -252,6 +252,8 @@ function broadcastRoomUpdate(roomName) {
   const room = rooms[roomName];
   if (!room) return;
   const record = getRoomRecord(roomName);
+  const vipRequired =
+    record && record.privacy === 'private' ? !!record.vipRequired : false;
 
   io.to(roomName).emit('room-update', {
     users: buildUserList(room),
@@ -259,7 +261,7 @@ function broadcastRoomUpdate(roomName) {
     locked: room.locked,
     streamTitle: room.streamTitle,
     privacy: record ? record.privacy : 'public',
-    vipRequired: record ? !!record.vipRequired : false
+    vipRequired
   });
 }
 
@@ -347,11 +349,13 @@ io.on('connection', (socket) => {
   socket.on('get-room-info', ({ roomName } = {}, callback) => {
     const reply = typeof callback === 'function' ? callback : () => {};
     const record = getRoomRecord(roomName);
+    const vipRequired =
+      record && record.privacy === 'private' ? !!record.vipRequired : false;
     reply({
       exists: !!record,
       privacy: record ? record.privacy : 'public',
       hasOwnerPassword: !!(record && record.ownerPassword),
-      vipRequired: record ? !!record.vipRequired : false
+      vipRequired
     });
   });
 
@@ -424,11 +428,24 @@ io.on('connection', (socket) => {
       reply({ ok: false, error: 'Room name and privacy are required.' });
       return;
     }
+    const info = getRoomInfo(targetName);
+    if (!requireOwner(info, socket)) {
+      reply({ ok: false, error: 'Only the host can update room privacy.' });
+      return;
+    }
     const normalizedPrivacy = privacy === 'private' ? 'private' : 'public';
     const result = updateRoomRecord(targetName, (room) => {
       room.privacy = normalizedPrivacy;
+      if (normalizedPrivacy === 'public') {
+        room.vipRequired = false;
+      }
     });
-    reply(result.ok ? { ok: true } : { ok: false, error: result.error });
+    if (!result.ok) {
+      reply({ ok: false, error: result.error });
+      return;
+    }
+    broadcastRoomUpdate(targetName);
+    reply({ ok: true, privacy: result.room.privacy, vipRequired: !!result.room.vipRequired });
   });
 
   socket.on('update-vip-required', ({ roomName, vipRequired } = {}, callback) => {
@@ -443,6 +460,19 @@ io.on('connection', (socket) => {
       reply({ ok: false, error: 'Only the host can update VIP requirements.' });
       return;
     }
+    const record = getRoomRecord(targetName);
+    if (!record) {
+      reply({ ok: false, error: 'Room not found.' });
+      return;
+    }
+    if (record.privacy !== 'private' && vipRequired) {
+      updateRoomRecord(targetName, (room) => {
+        room.vipRequired = false;
+      });
+      broadcastRoomUpdate(targetName);
+      reply({ ok: false, error: 'VIP access requires a private room.', vipRequired: false });
+      return;
+    }
     const result = updateRoomRecord(targetName, (room) => {
       room.vipRequired = !!vipRequired;
     });
@@ -451,7 +481,7 @@ io.on('connection', (socket) => {
       return;
     }
     broadcastRoomUpdate(targetName);
-    reply({ ok: true });
+    reply({ ok: true, vipRequired: !!result.room.vipRequired });
   });
 
   socket.on('update-room-live', ({ roomName, name, isLive, live, viewers, title } = {}, callback) => {
@@ -575,6 +605,15 @@ io.on('connection', (socket) => {
       reply({ ok: false, error: 'Only the host can generate VIP codes.' });
       return;
     }
+    const record = getRoomRecord(roomName);
+    if (!record) {
+      reply({ ok: false, error: 'Room not found.' });
+      return;
+    }
+    if (record.privacy !== 'private') {
+      reply({ ok: false, error: 'VIP codes are only available for private rooms.' });
+      return;
+    }
     const code = generateVipCode(6);
     const normalizedMaxUses = Number.isFinite(maxUses) ? Math.max(1, Math.floor(maxUses)) : 1;
     const result = updateRoomRecord(roomName, (storedRoom) => {
@@ -584,6 +623,7 @@ io.on('connection', (socket) => {
       reply({ ok: false, error: result.error });
       return;
     }
+    emitVipCodesUpdate(roomName);
     reply({ ok: true, code, maxUses: normalizedMaxUses, usesLeft: normalizedMaxUses });
   });
 
@@ -751,8 +791,12 @@ io.on('connection', (socket) => {
       socket.data.vipRooms.add(roomName);
     }
 
+    const privacy = directoryEntry ? directoryEntry.privacy : 'public';
+    const vipRequired = directoryEntry ? !!directoryEntry.vipRequired : false;
+    const vipGate = privacy === 'private' && vipRequired;
+
     let vipByCode = false;
-    if (viewerMode && vipCode && directoryEntry?.vipCodes) {
+    if (viewerMode && vipGate && vipCode && directoryEntry?.vipCodes) {
       const normalized = normalizeVipCode(vipCode);
       const meta = normalized ? directoryEntry.vipCodes[normalized] : null;
       if (meta && meta.usesLeft > 0) {
@@ -774,9 +818,8 @@ io.on('connection', (socket) => {
 
     const isVip =
       viewerMode && (vipByCode || (vipRooms && vipRooms.has(roomName)) || vipTokenAccepted);
-    const vipRequired = directoryEntry ? !!directoryEntry.vipRequired : false;
 
-    if (viewerMode && directoryEntry?.privacy === 'private' && vipRequired && !isVip) {
+    if (viewerMode && vipGate && !isVip) {
       reply({ ok: false, error: vipCode ? 'Invalid or exhausted VIP code.' : 'VIP code required.' });
       return;
     }
@@ -946,7 +989,7 @@ io.on('connection', (socket) => {
   // CHAT + FILE EVENTS
   // ======================================================
   socket.on('public-chat', ({ room, name, text, fromViewer }) => {
-    const roomName = room || socket.data.room;
+    const roomName = normalizeRoomName(room || socket.data.room);
     if (!roomName || !text) return;
     const info = rooms[roomName];
     io.to(roomName).emit('public-chat', {
@@ -959,7 +1002,7 @@ io.on('connection', (socket) => {
   });
 
   socket.on('private-chat', ({ room, name, text }) => {
-    const roomName = room || socket.data.room;
+    const roomName = normalizeRoomName(room || socket.data.room);
     if (!roomName || !text) return;
     io.to(roomName).emit('private-chat', {
       name: (name || socket.data.name || 'Anon').slice(0, 30),

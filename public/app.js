@@ -91,6 +91,10 @@ console.log('Rebel Stream Host App Loaded');
 
 const socket = io({ autoConnect: false });
 const $ = (id) => document.getElementById(id);
+const isSelftestMode = new URLSearchParams(window.location.search).get('selftest') === '1';
+if (isSelftestMode) {
+  window.__selftestHostSocket = socket;
+}
 
 const state = {
   currentRoom: null,
@@ -598,11 +602,18 @@ function ensureOverlayContainer() {
   return container;
 }
 
+function escapeOverlaySelector(value) {
+  if (window.CSS && typeof window.CSS.escape === 'function') {
+    return window.CSS.escape(value);
+  }
+  return String(value).replace(/[^a-zA-Z0-9_-]/g, '\\$&');
+}
+
 function resolveOverlaySelector(el, fieldName) {
   if (el.hasAttribute && el.hasAttribute('data-overlay-field')) {
-    return `[data-overlay-field="${CSS.escape(fieldName)}"]`;
+    return `[data-overlay-field="${escapeOverlaySelector(fieldName)}"]`;
   }
-  return `#${CSS.escape(fieldName)}`;
+  return `#${escapeOverlaySelector(fieldName)}`;
 }
 
 function buildOverlayFieldsFromHTML(htmlString) {
@@ -1825,8 +1836,14 @@ function updatePrivacyControlAvailability() {
     dom.publicRoomToggle.title = ready ? '' : 'Join a room to change privacy.';
   }
   if (dom.vipRequiredToggle) {
-    dom.vipRequiredToggle.disabled = !ready;
-    dom.vipRequiredToggle.title = ready ? '' : 'Join a room to change VIP access.';
+    dom.vipRequiredToggle.disabled = !ready || !state.isPrivateMode;
+    if (!ready) {
+      dom.vipRequiredToggle.title = 'Join a room to change VIP access.';
+    } else if (!state.isPrivateMode) {
+      dom.vipRequiredToggle.title = 'Turn on Private Room to require VIP codes.';
+    } else {
+      dom.vipRequiredToggle.title = '';
+    }
   }
   updateVipActionAvailability();
 }
@@ -1849,10 +1866,22 @@ function applyPrivacyState(isPrivate, { emitUpdate = true } = {}) {
     dom.guestListPanel.style.display = state.isPrivateMode ? 'block' : 'none';
   }
 
+  if (!state.isPrivateMode && state.vipRequired) {
+    applyVipRequiredState(false, { emitUpdate });
+  }
+
   if (emitUpdate && state.currentRoom) {
     socket.emit('update-room-privacy', {
       roomName: state.currentRoom,
       privacy: state.isPrivateMode ? 'private' : 'public'
+    }, (resp) => {
+      if (!resp?.ok) {
+        setVipStatus(resp?.error || 'Unable to update room privacy.', 'error');
+        return;
+      }
+      if (resp?.vipRequired === false && state.vipRequired) {
+        applyVipRequiredState(false, { emitUpdate: false });
+      }
     });
   }
 
@@ -1866,11 +1895,20 @@ function applyPrivacyState(isPrivate, { emitUpdate = true } = {}) {
       }
     });
   }
-  updateVipActionAvailability();
+  updatePrivacyControlAvailability();
 }
 
 function applyVipRequiredState(isRequired, { emitUpdate = true } = {}) {
-  state.vipRequired = !!isRequired;
+  const nextRequired = !!isRequired;
+  if (nextRequired && !state.isPrivateMode) {
+    state.vipRequired = false;
+    if (dom.vipRequiredToggle) {
+      dom.vipRequiredToggle.textContent = 'OFF';
+      dom.vipRequiredToggle.className = 'btn small secondary';
+    }
+    return;
+  }
+  state.vipRequired = nextRequired;
   if (dom.vipRequiredToggle) {
     dom.vipRequiredToggle.textContent = state.vipRequired ? 'ON' : 'OFF';
     dom.vipRequiredToggle.className = state.vipRequired
@@ -1881,6 +1919,17 @@ function applyVipRequiredState(isRequired, { emitUpdate = true } = {}) {
     socket.emit('update-vip-required', {
       roomName: state.currentRoom,
       vipRequired: state.vipRequired
+    }, (resp) => {
+      if (!resp?.ok) {
+        setVipStatus(resp?.error || 'Unable to update VIP access.', 'error');
+        if (state.vipRequired) {
+          applyVipRequiredState(false, { emitUpdate: false });
+        }
+        return;
+      }
+      if (typeof resp?.vipRequired === 'boolean' && resp.vipRequired !== state.vipRequired) {
+        applyVipRequiredState(resp.vipRequired, { emitUpdate: false });
+      }
     });
   }
 }
@@ -2142,12 +2191,12 @@ if (dom.generateVipCodeBtn) {
     const maxUses = dom.vipCodeUses ? Number(dom.vipCodeUses.value) : 1;
     socket.emit('generate-vip-code', { room: state.currentRoom, maxUses }, (resp) => {
       if (resp?.ok && resp?.code) {
-        state.vipCodes.push({
-          code: resp.code,
-          maxUses: resp.maxUses || maxUses || 1,
-          usesLeft: resp.usesLeft ?? resp.maxUses ?? maxUses ?? 1
+        socket.emit('get-vip-codes', { roomName: state.currentRoom }, (codesResp) => {
+          if (codesResp?.ok) {
+            state.vipCodes = Array.isArray(codesResp.codes) ? codesResp.codes : [];
+            renderVipCodes();
+          }
         });
-        renderVipCodes();
         setVipStatus('VIP code generated.');
       } else {
         setVipStatus(resp?.error || 'Unable to generate VIP code.', 'error');
@@ -2181,6 +2230,10 @@ if (dom.vipRequiredToggle) {
   dom.vipRequiredToggle.onclick = () => {
     if (!canUpdateRoomSettings()) {
       setVipStatus('Join a room to change VIP access.', 'error');
+      return;
+    }
+    if (!state.isPrivateMode && !state.vipRequired) {
+      setVipStatus('Turn on Private Room before enabling VIP access.', 'error');
       return;
     }
     applyVipRequiredState(!state.vipRequired);
@@ -2232,7 +2285,8 @@ function appendChat(log, name, text, ts) {
 function sendPublic() {
   if (!dom.inputPublic) return;
   const t = dom.inputPublic.value.trim();
-  if (!t || !state.currentRoom) return;
+  if (!t || !state.currentRoom || !state.joined) return;
+  if (!socket.connected) socket.connect();
 
   socket.emit('public-chat', {
     room: state.currentRoom,
@@ -2256,7 +2310,8 @@ if (dom.inputPublic) {
 function sendPrivate() {
   if (!dom.inputPrivate) return;
   const t = dom.inputPrivate.value.trim();
-  if (!t || !state.currentRoom) return;
+  if (!t || !state.currentRoom || !state.joined) return;
+  if (!socket.connected) socket.connect();
 
   socket.emit('private-chat', {
     room: state.currentRoom,
