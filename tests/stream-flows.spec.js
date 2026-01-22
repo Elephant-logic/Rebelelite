@@ -82,11 +82,19 @@ test('private viewers require VIP access and VIP usage decrements', async ({ bro
 
   await host.click('#togglePrivateBtn');
   await expect(host.locator('#togglePrivateBtn')).toHaveText('ON');
+  await host.click('#vipRequiredToggle');
+  await expect(host.locator('#vipRequiredToggle')).toHaveText('ON');
 
   const blockedViewer = await browser.newPage();
   await joinViewer(blockedViewer, room, { name: 'NoVip' });
   await expect(blockedViewer.locator('#joinStatus')).toContainText('VIP');
   await blockedViewer.close();
+
+  await host.fill('#vipUserInput', 'VIPListed');
+  await host.click('#addVipUserBtn');
+  const vipListedViewer = await browser.newPage();
+  await joinViewer(vipListedViewer, room, { name: 'VIPListed' });
+  await expect(vipListedViewer.locator('#viewerJoinPanel')).toHaveClass(/hidden/);
 
   await host.selectOption('#vipCodeUses', '1');
   await host.click('#generateVipCodeBtn');
@@ -120,6 +128,7 @@ test('host controls respond and stage call completes signaling', async ({ browse
   await expect(host.locator('#shareScreenBtn')).toHaveText('Share Screen');
 
   await host.click('#togglePrivateBtn');
+  await host.click('#vipRequiredToggle');
 
   await host.selectOption('#vipCodeUses', '1');
   await host.click('#generateVipCodeBtn');

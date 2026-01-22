@@ -795,6 +795,14 @@ io.on('connection', (socket) => {
     const vipRequired = directoryEntry ? !!directoryEntry.vipRequired : false;
     const vipGate = privacy === 'private' && vipRequired;
 
+    const vipByName =
+      viewerMode &&
+      vipGate &&
+      Array.isArray(directoryEntry?.vipUsers) &&
+      directoryEntry.vipUsers.some(
+        (user) => String(user).trim().toLowerCase() === displayName.toLowerCase()
+      );
+
     let vipByCode = false;
     if (viewerMode && vipGate && vipCode && directoryEntry?.vipCodes) {
       const normalized = normalizeVipCode(vipCode);
@@ -817,7 +825,8 @@ io.on('connection', (socket) => {
     }
 
     const isVip =
-      viewerMode && (vipByCode || (vipRooms && vipRooms.has(roomName)) || vipTokenAccepted);
+      viewerMode &&
+      (vipByName || vipByCode || (vipRooms && vipRooms.has(roomName)) || vipTokenAccepted);
 
     if (viewerMode && vipGate && !isVip) {
       reply({ ok: false, error: vipCode ? 'Invalid or exhausted VIP code.' : 'VIP code required.' });

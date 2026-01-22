@@ -72,6 +72,8 @@ test('viewer private room requires VIP code', async ({ context }) => {
 
   await hostPage.click('#togglePrivateBtn');
   await expect(hostPage.locator('#togglePrivateBtn')).toHaveText('ON');
+  await hostPage.click('#vipRequiredToggle');
+  await expect(hostPage.locator('#vipRequiredToggle')).toHaveText('ON');
   await hostPage.fill('#vipCodeUses', '1');
   await hostPage.click('#generateVipCodeBtn');
   const vipCodeEntry = hostPage.locator('#vipCodeList span').first();

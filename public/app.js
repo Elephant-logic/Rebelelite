@@ -571,6 +571,8 @@ const TEXT_LIKE_TAGS = new Set([
   'label'
 ]);
 
+const KNOWN_OVERLAY_FIELDS = ['ticker', 'tickerTop', 'tickerBottom', 'djName', 'logo'];
+
 function getOverlayFieldName(el) {
   if (!el || !el.getAttribute) return '';
   const dataName = el.getAttribute('data-overlay-field');
@@ -610,8 +612,14 @@ function escapeOverlaySelector(value) {
 }
 
 function resolveOverlaySelector(el, fieldName) {
-  if (el.hasAttribute && el.hasAttribute('data-overlay-field')) {
+  if (el?.hasAttribute && el.hasAttribute('data-overlay-field')) {
     return `[data-overlay-field="${escapeOverlaySelector(fieldName)}"]`;
+  }
+  if (el?.id && el.id.trim() === fieldName) {
+    return `#${escapeOverlaySelector(fieldName)}`;
+  }
+  if (el?.classList && el.classList.contains(fieldName)) {
+    return `.${escapeOverlaySelector(fieldName)}`;
   }
   return `#${escapeOverlaySelector(fieldName)}`;
 }
@@ -622,9 +630,25 @@ function buildOverlayFieldsFromHTML(htmlString) {
   const fields = [];
   const used = new Set();
 
-  doc.querySelectorAll('*').forEach((el) => {
+  doc.querySelectorAll('[data-overlay-field]').forEach((el) => {
     const name = getOverlayFieldName(el);
     if (!name || used.has(name)) return;
+    used.add(name);
+    const type = getOverlayFieldType(el);
+    const selector = resolveOverlaySelector(el, name);
+    const initialValue =
+      type === 'text'
+        ? (el.textContent || '').trim()
+        : (el.getAttribute('src') || '').trim();
+    fields.push({ name, type, selector, initialValue });
+  });
+
+  KNOWN_OVERLAY_FIELDS.forEach((name) => {
+    if (used.has(name)) return;
+    const escapedName = escapeOverlaySelector(name);
+    const el =
+      doc.getElementById(name) || doc.querySelector(`.${escapedName}`);
+    if (!el) return;
     used.add(name);
     const type = getOverlayFieldType(el);
     const selector = resolveOverlaySelector(el, name);
@@ -664,34 +688,36 @@ function prepareOverlayVideo(videoEl) {
 
 function applyOverlayFieldValues(container) {
   state.overlayFields.forEach((field) => {
-    const el = container.querySelector(field.selector);
-    if (!el) return;
+    const elements = container.querySelectorAll(field.selector);
+    if (!elements.length) return;
     const value = state.overlayFieldValues[field.name] ?? '';
 
-    if (field.type === 'text') {
-      el.textContent = value;
-      return;
-    }
-
-    if (field.type === 'image') {
-      el.setAttribute('src', value);
-      return;
-    }
-
-    if (field.type === 'video') {
-      if (el.tagName.toLowerCase() === 'source') {
-        el.setAttribute('src', value);
-        const video = el.parentElement;
-        if (video && video.tagName.toLowerCase() === 'video') {
-          video.load();
-          prepareOverlayVideo(video);
-        }
-      } else {
-        el.setAttribute('src', value);
-        el.load?.();
-        prepareOverlayVideo(el);
+    elements.forEach((el) => {
+      if (field.type === 'text') {
+        el.textContent = value;
+        return;
       }
-    }
+
+      if (field.type === 'image') {
+        el.setAttribute('src', value);
+        return;
+      }
+
+      if (field.type === 'video') {
+        if (el.tagName.toLowerCase() === 'source') {
+          el.setAttribute('src', value);
+          const video = el.parentElement;
+          if (video && video.tagName.toLowerCase() === 'video') {
+            video.load();
+            prepareOverlayVideo(video);
+          }
+        } else {
+          el.setAttribute('src', value);
+          el.load?.();
+          prepareOverlayVideo(el);
+        }
+      }
+    });
   });
 }
 
