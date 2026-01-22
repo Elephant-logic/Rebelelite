@@ -76,6 +76,28 @@
       
       /* NEW: Live Status state */
       .status-pill.live { background: var(--accent); color: #000; }
+
+      .viewer-join {
+          position: absolute; inset: 0; display: flex; align-items: center; justify-content: center;
+          background: rgba(0,0,0,0.75); z-index: 150;
+      }
+      .viewer-join.hidden { display: none; }
+      .join-card {
+          width: min(360px, 90vw); background: rgba(12,16,28,0.95); border: 1px solid rgba(255,255,255,0.1);
+          border-radius: 14px; padding: 20px; display: flex; flex-direction: column; gap: 10px;
+          box-shadow: 0 10px 40px rgba(0,0,0,0.4);
+      }
+      .join-card h3 { margin: 0 0 4px; font-size: 1rem; }
+      .join-card label { font-size: 0.75rem; color: var(--muted); }
+      .join-card input {
+          padding: 10px; border-radius: 8px; border: 1px solid rgba(255,255,255,0.15);
+          background: rgba(255,255,255,0.08); color: #fff;
+      }
+      .join-card button {
+          background: var(--accent); color: #000; border: none; padding: 10px; border-radius: 8px; font-weight: 700;
+          cursor: pointer;
+      }
+      #joinStatus { font-size: 0.75rem; color: var(--muted); min-height: 16px; text-align: center; }
     </style>
   </head>
   <body>
@@ -85,6 +107,18 @@
         </div>
         
         <div id="toolboxContainer"></div>
+
+        <div id="viewerJoinPanel" class="viewer-join">
+            <div class="join-card">
+                <h3>Enter Stream</h3>
+                <label for="viewerNameInput">Display Name</label>
+                <input id="viewerNameInput" type="text" placeholder="Your name" />
+                <label for="viewerVipCodeInput">VIP Code (optional)</label>
+                <input id="viewerVipCodeInput" type="text" placeholder="e.g. 8XFA12" />
+                <button id="joinRoomBtn">Join Room</button>
+                <div id="joinStatus"></div>
+            </div>
+        </div>
         
         <div id="chatBox" class="chat-overlay">
             <div class="chat-header">

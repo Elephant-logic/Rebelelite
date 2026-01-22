@@ -45,6 +45,24 @@ function ensureRoomsFile() {
   }
 }
 
+function normalizeStoredRoom(record) {
+  if (!record || typeof record !== 'object') return false;
+  let changed = false;
+  if (!Array.isArray(record.vipUsers)) {
+    record.vipUsers = [];
+    changed = true;
+  }
+  if (!Array.isArray(record.vipCodes)) {
+    record.vipCodes = [];
+    changed = true;
+  }
+  if (typeof record.paid !== 'boolean') {
+    record.paid = false;
+    changed = true;
+  }
+  return changed;
+}
+
 function loadRoomsStore() {
   ensureRoomsFile();
   try {
@@ -54,6 +72,13 @@ function loadRoomsStore() {
     if (!parsed || typeof parsed !== 'object' || typeof parsed.rooms !== 'object') {
       fs.writeFileSync(ROOMS_FILE, JSON.stringify(DEFAULT_ROOMS_STORE, null, 2));
       return { rooms: {} };
+    }
+    let changed = false;
+    Object.values(parsed.rooms).forEach((room) => {
+      if (normalizeStoredRoom(room)) changed = true;
+    });
+    if (changed) {
+      fs.writeFileSync(ROOMS_FILE, JSON.stringify(parsed, null, 2));
     }
     return parsed;
   } catch (error) {
@@ -72,7 +97,9 @@ function queueRoomsWrite() {
 function getStoredRoom(roomName) {
   const name = normalizeRoomName(roomName);
   if (!name) return null;
-  return roomsStore.rooms[name] || null;
+  const record = roomsStore.rooms[name] || null;
+  if (record) normalizeStoredRoom(record);
+  return record;
 }
 
 function listPublicRooms() {
@@ -100,7 +127,10 @@ async function createStoredRoom({ name, password, privacy, owner }) {
     created: new Date().toISOString(),
     live: false,
     viewers: 0,
-    title: null
+    title: null,
+    vipUsers: [],
+    vipCodes: [],
+    paid: false
   };
   roomsStore.rooms[roomName] = record;
   try {
@@ -144,21 +174,53 @@ function getRoomInfo(roomName) {
   return rooms[roomName];
 }
 
-// Broadcast the latest room state to everyone in the room.
-function broadcastRoomUpdate(roomName) {
-  const room = rooms[roomName];
-  if (!room) return;
+function normalizeVipCode(value) {
+  if (!value || typeof value !== 'string') return '';
+  return value.trim().toUpperCase();
+}
 
+function isVipForRoom(record, displayName, vipCode) {
+  if (!record) return false;
+  const normalizedName = (displayName || '').trim().toLowerCase();
+  const normalizedCode = normalizeVipCode(vipCode);
+  const vipByName = normalizedName
+    ? record.vipUsers.some((user) => String(user).trim().toLowerCase() === normalizedName)
+    : false;
+  const vipByCode = normalizedCode
+    ? record.vipCodes.some((code) => normalizeVipCode(code) === normalizedCode)
+    : false;
+  return vipByName || vipByCode;
+}
+
+function requireRoom(socket) {
+  return socket.data.room || null;
+}
+
+function requireOwner(info, socket) {
+  return info && info.ownerId === socket.id;
+}
+
+function buildUserList(room) {
   const users = [];
   for (const [id, u] of room.users.entries()) {
     users.push({
       id,
       name: u.name,
       isViewer: u.isViewer,
-      requestingCall: u.requestingCall
+      requestingCall: u.requestingCall,
+      isVip: u.isVip
     });
   }
   return users;
+}
+
+function generateVipCode(length = 6) {
+  const chars = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
+  let output = '';
+  for (let i = 0; i < length; i += 1) {
+    output += chars.charAt(Math.floor(Math.random() * chars.length));
+  }
+  return output;
 }
 
 function broadcastRoomUpdate(roomName) {
@@ -264,11 +326,64 @@ io.on('connection', (socket) => {
     reply(result.ok ? { ok: true } : { ok: false, error: result.error });
   });
 
+  socket.on('add-vip-user', async ({ room, userName } = {}, callback) => {
+    const reply = typeof callback === 'function' ? callback : () => {};
+    const roomName = normalizeRoomName(room);
+    const trimmedName = typeof userName === 'string' ? userName.trim() : '';
+    if (!roomName || !trimmedName) {
+      reply({ ok: false, error: 'Room and username are required.' });
+      return;
+    }
+    const info = getRoomInfo(roomName);
+    if (!requireOwner(info, socket)) {
+      reply({ ok: false, error: 'Only the host can add VIP users.' });
+      return;
+    }
+    const result = await updateStoredRoom(roomName, (storedRoom) => {
+      normalizeStoredRoom(storedRoom);
+      const exists = storedRoom.vipUsers.some(
+        (user) => String(user).trim().toLowerCase() === trimmedName.toLowerCase()
+      );
+      if (!exists) storedRoom.vipUsers.push(trimmedName);
+    });
+    if (!result.ok) {
+      reply({ ok: false, error: result.error });
+      return;
+    }
+    reply({ ok: true });
+  });
+
+  socket.on('generate-vip-code', async ({ room } = {}, callback) => {
+    const reply = typeof callback === 'function' ? callback : () => {};
+    const roomName = normalizeRoomName(room);
+    if (!roomName) {
+      reply({ ok: false, error: 'Room is required.' });
+      return;
+    }
+    const info = getRoomInfo(roomName);
+    if (!requireOwner(info, socket)) {
+      reply({ ok: false, error: 'Only the host can generate VIP codes.' });
+      return;
+    }
+    const code = generateVipCode(6);
+    const result = await updateStoredRoom(roomName, (storedRoom) => {
+      normalizeStoredRoom(storedRoom);
+      storedRoom.vipCodes.push(code);
+    });
+    if (!result.ok) {
+      reply({ ok: false, error: result.error });
+      return;
+    }
+    reply({ ok: true, code });
+  });
+
   // ======================================================
   // ROOM JOIN + ROLE ASSIGNMENT
   // ======================================================
-  socket.on('join-room', ({ room, name, isViewer }) => {
+  socket.on('join-room', ({ room, name, isViewer, vipCode } = {}, callback) => {
+    const reply = typeof callback === 'function' ? callback : () => {};
     if (!room || typeof room !== 'string') {
+      reply({ ok: false, error: 'Invalid room' });
       socket.emit('room-error', 'Invalid room');
       return;
     }
@@ -286,33 +401,54 @@ io.on('connection', (socket) => {
     }
 
     if (info.locked && info.ownerId && info.ownerId !== socket.id) {
+      reply({ ok: false, error: 'Room is locked by host' });
       socket.emit('room-error', 'Room is locked by host');
       socket.disconnect();
+      return;
+    }
+
+    const viewerMode = !!isViewer;
+    const isVip = viewerMode ? isVipForRoom(directoryEntry, displayName, vipCode) : false;
+
+    if (viewerMode && directoryEntry?.privacy === 'private' && !isVip) {
+      reply({ ok: false, error: 'This room is private · VIPs only' });
       return;
     }
 
     socket.join(roomName);
     socket.data.room = roomName;
     socket.data.name = displayName;
-    socket.data.isViewer = !!isViewer;
+    socket.data.isViewer = viewerMode;
+    socket.data.isVip = isVip;
+    socket.data.roomRole = isVip ? 'vip' : viewerMode ? 'viewer' : 'host';
 
-    if (!info.ownerId && !isViewer) {
+    if (!info.ownerId && !viewerMode) {
       info.ownerId = socket.id;
     }
 
     info.users.set(socket.id, {
       name: displayName,
-      isViewer: !!isViewer,
-      requestingCall: false
+      isViewer: viewerMode,
+      requestingCall: false,
+      isVip
     });
 
+    const isHost = info.ownerId === socket.id;
     socket.emit('role', {
-      isHost: info.ownerId === socket.id,
+      isHost,
       streamTitle: info.streamTitle
     });
 
     socket.to(roomName).emit('user-joined', { id: socket.id, name: displayName });
     broadcastRoomUpdate(roomName);
+    const response = { ok: true, isVip, isHost };
+    if (isHost && directoryEntry) {
+      normalizeStoredRoom(directoryEntry);
+      response.vipUsers = [...directoryEntry.vipUsers];
+      response.vipCodes = [...directoryEntry.vipCodes];
+      response.privacy = directoryEntry.privacy;
+    }
+    reply(response);
   });
 
   // Viewer "raise hand" request (host receives a prompt)

@@ -95,6 +95,23 @@
             </div>
           </div>
 
+          <div class="field" style="margin-top:15px; border-top:1px solid var(--border); padding-top:10px;">
+            <label style="color:var(--accent);">✨ VIP Access</label>
+            <p style="font-size:0.7rem; color:var(--muted); margin-bottom:6px;">
+              Grant guest access by username or shareable code.
+            </p>
+            <div style="display:flex; gap:5px;">
+              <input id="vipUserInput" type="text" placeholder="Add VIP username" style="font-size:0.8rem; padding:6px; flex:1;" />
+              <button id="addVipUserBtn" class="btn small primary">Add</button>
+            </div>
+            <div id="vipUserList" style="margin-top:6px; max-height:80px; overflow-y:auto; display:flex; flex-wrap:wrap; gap:4px;"></div>
+            <div style="display:flex; gap:5px; margin-top:8px;">
+              <button id="generateVipCodeBtn" class="btn small secondary" style="flex:1;">Generate VIP Code</button>
+            </div>
+            <div id="vipCodeList" style="margin-top:6px; max-height:80px; overflow-y:auto; display:flex; flex-wrap:wrap; gap:4px;"></div>
+            <div id="vipStatus" style="font-size:0.7rem; color:var(--muted); margin-top:6px; text-align:center;"></div>
+          </div>
+
           <button id="lockRoomBtn" class="btn full-width" style="margin-top:15px;">🔓 Lock Room</button>
 
           <div class="field" style="margin-top:20px; border-top:1px solid var(--border); padding-top:10px;">
