@@ -155,6 +155,7 @@ const dom = {
   updateTitleBtn: $('updateTitleBtn'),
   updateSlugBtn: $('updateSlugBtn'),
   slugInput: $('slugInput'),
+  publicRoomToggle: $('publicRoomToggle'),
   togglePrivateBtn: $('togglePrivateBtn'),
   addGuestBtn: $('addGuestBtn'),
   guestNameInput: $('guestNameInput'),
@@ -204,6 +205,18 @@ function applyRoomQueryDefaults() {
 
   return { roomValue, roleParam };
 }
+
+function maybeAutoJoinHost() {
+  const params = new URLSearchParams(window.location.search);
+  const roomParam = params.get('room');
+  const roleParam = params.get('role');
+  if (!roomParam || roleParam !== 'host') return;
+  if (dom.joinBtn && !dom.joinBtn.disabled) {
+    dom.joinBtn.click();
+  }
+}
+
+window.addEventListener('load', maybeAutoJoinHost);
 
 // ======================================================
 // CANVAS MIXER MODULE (CAMERA -> CANVAS -> CAPTURESTREAM)
@@ -1352,16 +1365,6 @@ function updateLink(roomSlug) {
 }
 
 socket.on('user-joined', ({ id, name }) => {
-  if (state.iAmHost && state.isPrivateMode) {
-    const allowed = state.allowedGuests.some(
-      (g) => g.toLowerCase() === name.toLowerCase()
-    );
-    if (!allowed) {
-      socket.emit('kick-user', id);
-      return;
-    }
-  }
-
   const privateLog = $('chatLogPrivate');
   appendChat(privateLog, 'System', `${name} joined room`, Date.now());
 
@@ -1472,17 +1475,19 @@ if (dom.slugInput) {
   };
 }
 
-if (dom.togglePrivateBtn) {
-  dom.togglePrivateBtn.onclick = () => {
-    state.isPrivateMode = !state.isPrivateMode;
+function applyPrivacyState(isPrivate, { emitUpdate = true } = {}) {
+  state.isPrivateMode = !!isPrivate;
+
+  if (dom.togglePrivateBtn) {
     dom.togglePrivateBtn.textContent = state.isPrivateMode ? 'ON' : 'OFF';
     dom.togglePrivateBtn.className = state.isPrivateMode
       ? 'btn small danger'
       : 'btn small secondary';
+  }
 
-    if (dom.guestListPanel) {
-      dom.guestListPanel.style.display = state.isPrivateMode ? 'block' : 'none';
-    }
+  if (dom.publicRoomToggle) {
+    dom.publicRoomToggle.checked = !state.isPrivateMode;
+  }
 
     if (state.currentRoom) {
       socket.emit('update-room-privacy', {
@@ -1856,6 +1861,14 @@ function renderUserList() {
           ' <span title="Requesting to Join Stream">✋</span>';
       }
 
+      if (u.isVip) {
+        const vipBadge = document.createElement('span');
+        vipBadge.textContent = ' VIP';
+        vipBadge.style.cssText =
+          'margin-left:6px; font-size:0.6rem; color:#000; background:var(--accent); padding:2px 5px; border-radius:4px;';
+        nameSpan.appendChild(vipBadge);
+      }
+
       const statsBadge = document.createElement('small');
       statsBadge.id = `stats-${u.id}`;
       statsBadge.style.cssText = 'margin-left:8px; font-size:0.6rem; opacity:0.7;';
@@ -1889,7 +1902,11 @@ function renderUserList() {
         callBtn.style.color = 'var(--danger)';
         callBtn.onclick = () => endPeerCall(u.id);
       } else {
-        callBtn.textContent = u.requestingCall ? 'Accept & Call' : 'Call';
+        if (u.requestingCall) {
+          callBtn.textContent = u.isVip ? 'Accept & Call VIP' : 'Accept & Call';
+        } else {
+          callBtn.textContent = u.isVip ? 'Call VIP' : 'Call';
+        }
         if (u.requestingCall) callBtn.style.borderColor = 'var(--accent)';
         callBtn.onclick = () => window.ringUser(u.id);
       }
