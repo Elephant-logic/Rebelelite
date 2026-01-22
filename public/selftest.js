@@ -416,6 +416,36 @@ async function testVipViewerJoinAndUsage() {
   return 'VIP viewer joined and usage decremented.';
 }
 
+async function testRoomPaymentsConfig() {
+  if (!context.hostSocket) throw new Error('Host socket not initialized');
+  const updateResp = await emitWithAck(context.hostSocket, 'update-room-payments', {
+    roomName: context.roomName,
+    paymentEnabled: true,
+    paymentLabel: 'Tip the host',
+    paymentUrl: 'https://example.com/payments'
+  });
+  if (!updateResp?.ok) {
+    throw new Error(updateResp?.error || 'Unable to update room payments');
+  }
+
+  const viewerSocket = context.viewerSocket || io({ autoConnect: false });
+  if (!viewerSocket.connected) {
+    await connectSocket(viewerSocket);
+  }
+
+  const configResp = await emitWithAck(viewerSocket, 'get-room-config', {
+    roomName: context.roomName
+  });
+  if (!configResp?.ok) throw new Error(configResp?.error || 'Unable to fetch room config');
+  if (!configResp.paymentEnabled) throw new Error('Payment enabled flag missing');
+  if (configResp.paymentLabel !== 'Tip the host') throw new Error('Payment label mismatch');
+  if (configResp.paymentUrl !== 'https://example.com/payments') {
+    throw new Error('Payment URL mismatch');
+  }
+
+  return 'Room payment settings saved and readable by viewer.';
+}
+
 async function testStudioButtonsWired() {
   if (!studioFrame) throw new Error('Studio iframe missing');
 
@@ -614,6 +644,10 @@ async function run() {
     {
       name: 'Public viewers join without VIP and receive broadcast tracks',
       run: testPublicViewerJoinAndBroadcast
+    },
+    {
+      name: 'Room payments can be configured and read by viewers',
+      run: testRoomPaymentsConfig
     },
     {
       name: 'Private viewers cannot join without VIP',
