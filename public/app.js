@@ -98,6 +98,7 @@ const state = {
   myId: null,
   iAmHost: false,
   wasHost: false,
+  joined: false,
   latestUserList: [],
   currentOwnerId: null,
   isPrivateMode: false,
@@ -154,6 +155,7 @@ const dom = {
   updateTitleBtn: $('updateTitleBtn'),
   updateSlugBtn: $('updateSlugBtn'),
   slugInput: $('slugInput'),
+  publicRoomToggle: $('publicRoomToggle'),
   togglePrivateBtn: $('togglePrivateBtn'),
   addGuestBtn: $('addGuestBtn'),
   guestNameInput: $('guestNameInput'),
@@ -200,9 +202,21 @@ function applyRoomQueryDefaults() {
     state.iAmHost = true;
     state.wasHost = true;
   }
+
+  return { roomValue, roleParam };
 }
 
-window.addEventListener('load', applyRoomQueryDefaults);
+function maybeAutoJoinHost() {
+  const params = new URLSearchParams(window.location.search);
+  const roomParam = params.get('room');
+  const roleParam = params.get('role');
+  if (!roomParam || roleParam !== 'host') return;
+  if (dom.joinBtn && !dom.joinBtn.disabled) {
+    dom.joinBtn.click();
+  }
+}
+
+window.addEventListener('load', maybeAutoJoinHost);
 
 // ======================================================
 // CANVAS MIXER MODULE (CAMERA -> CANVAS -> CAPTURESTREAM)
@@ -835,6 +849,9 @@ function updateStreamButton(isLive) {
 function stopStream() {
     state.isStreaming = false; //
     updateStreamButton(false); //
+    if (state.currentRoom) {
+      socket.emit('update-room-live', { roomName: state.currentRoom, isLive: false });
+    }
 
     Object.values(viewerPeers).forEach(pc => pc.close()); //
     for (const k in viewerPeers) {
@@ -857,6 +874,9 @@ async function startStream() {
 
     state.isStreaming = true; //
     updateStreamButton(true); //
+    if (state.currentRoom) {
+      socket.emit('update-room-live', { roomName: state.currentRoom, isLive: true });
+    }
 
   state.latestUserList.forEach((u) => {
     if (u.id !== state.myId) {
@@ -1185,86 +1205,123 @@ socket.on('disconnect', () => {
   }
 });
 
+function emitWithAck(eventName, payload) {
+  return new Promise((resolve) => {
+    socket.emit(eventName, payload, resolve);
+  });
+}
+
+function applyPrivacyState(privacy) {
+  state.isPrivateMode = privacy === 'private';
+  if (dom.togglePrivateBtn) {
+    dom.togglePrivateBtn.textContent = state.isPrivateMode ? 'ON' : 'OFF';
+    dom.togglePrivateBtn.className = state.isPrivateMode
+      ? 'btn small danger'
+      : 'btn small secondary';
+  }
+  if (dom.guestListPanel) {
+    dom.guestListPanel.style.display = state.isPrivateMode ? 'block' : 'none';
+  }
+}
+
+async function ensureHostRoom(roomName) {
+  const info = await emitWithAck('get-room-info', { roomName });
+  if (!info?.exists) {
+    const createResp = await emitWithAck('enter-host-room', {
+      roomName,
+      privacy: 'public'
+    });
+    if (!createResp?.ok) {
+      return { ok: false, error: createResp?.error || 'Unable to create room.' };
+    }
+    return { ok: true, created: true };
+  }
+
+  if (info.hasOwnerPassword) {
+    const storedPassword = sessionStorage.getItem(`hostPassword:${roomName}`);
+    const password = storedPassword || window.prompt('Enter host password for this room:') || '';
+    if (!password) {
+      return { ok: false, error: 'Host password is required to enter this room.' };
+    }
+    const authResp = await emitWithAck('enter-host-room', { roomName, password });
+    if (!authResp?.ok) {
+      return { ok: false, error: authResp?.error || 'Invalid password.' };
+    }
+    sessionStorage.setItem(`hostPassword:${roomName}`, password);
+  } else {
+    const authResp = await emitWithAck('enter-host-room', { roomName });
+    if (!authResp?.ok) {
+      return { ok: false, error: authResp?.error || 'Unable to enter room.' };
+    }
+  }
+
+  return { ok: true, created: false };
+}
+
+async function joinRoomAsHost(room) {
+  if (!room) return;
+  state.iAmHost = true;
+  state.wasHost = true;
+  if (state.joined && state.currentRoom === room) return;
+  if (state.joined && state.currentRoom && state.currentRoom !== room) {
+    window.location.href = `/index.html?room=${encodeURIComponent(room)}&role=host`;
+    return;
+  }
+
+  state.currentRoom = room;
+  const nameInput = $('nameInput');
+  state.userName = nameInput && nameInput.value.trim() ? nameInput.value.trim() : 'Host';
+
+  if (!socket.connected) socket.connect();
+
+  const access = await ensureHostRoom(room);
+  if (!access.ok) {
+    alert(access.error || 'Unable to access room.');
+    return;
+  }
+
+  socket.emit('join-room', { room, name: state.userName, isViewer: false }, (resp) => {
+    if (resp?.isHost) {
+      state.vipUsers = Array.isArray(resp.vipUsers) ? resp.vipUsers : [];
+      state.vipCodes = Array.isArray(resp.vipCodes) ? resp.vipCodes : [];
+      renderVipUsers();
+      renderVipCodes();
+      if (resp?.privacy) {
+        applyPrivacyState(resp.privacy);
+      }
+      socket.emit('get-vip-codes', { roomName: room }, (codesResp) => {
+        if (codesResp?.ok) {
+          state.vipCodes = Array.isArray(codesResp.codes) ? codesResp.codes : [];
+          renderVipCodes();
+        }
+      });
+    } else if (resp?.error) {
+      alert(resp.error);
+      return;
+    }
+    state.joined = true;
+  });
+
+  if (dom.leaveBtn) dom.leaveBtn.disabled = false;
+
+  updateLink(room);
+  startLocalMedia();
+}
+
+async function autoJoinHostRoom(room) {
+  if (!room) return;
+  state.iAmHost = true;
+  state.wasHost = true;
+  await joinRoomAsHost(room);
+}
+
 if (dom.joinBtn) {
   dom.joinBtn.onclick = () => {
     const room = $('roomInput').value.trim();
     if (!room) return;
 
     state.currentRoom = room;
-    const nameInput = $('nameInput');
-    state.userName = nameInput && nameInput.value.trim() ? nameInput.value.trim() : 'Host';
-
-    socket.connect();
-    const joinAsHost = () => {
-      socket.emit('join-room', { room, name: state.userName, isViewer: false }, (resp) => {
-        if (resp?.isHost) {
-          state.vipUsers = Array.isArray(resp.vipUsers) ? resp.vipUsers : [];
-          state.vipCodes = Array.isArray(resp.vipCodes) ? resp.vipCodes : [];
-          renderVipUsers();
-          renderVipCodes();
-          socket.emit('get-vip-codes', { roomName: room }, (codesResp) => {
-            if (codesResp?.ok) {
-              state.vipCodes = Array.isArray(codesResp.codes) ? codesResp.codes : [];
-              renderVipCodes();
-            }
-          });
-        } else if (resp?.error) {
-          alert(resp.error);
-          return;
-        }
-      });
-
-      dom.joinBtn.disabled = true;
-      if (dom.leaveBtn) dom.leaveBtn.disabled = false;
-
-      updateLink(room);
-      startLocalMedia();
-    };
-
-    socket.emit('check-room-claimed', { roomName: room }, (claimedResp) => {
-      if (!claimedResp?.claimed) {
-        state.iAmHost = true;
-        state.wasHost = true;
-        joinAsHost();
-        return;
-      }
-
-      const params = new URLSearchParams(window.location.search);
-      const authed = params.get('authed') === '1';
-      const cachedPassword = sessionStorage.getItem(`hostPassword:${room}`);
-      const cachedAccess = sessionStorage.getItem(`hostAccess:${room}`) === '1';
-      const useCachedPassword = !!(cachedPassword && (authed || cachedAccess));
-      const needsPassword = claimedResp?.hasPassword;
-      const password = needsPassword
-        ? (useCachedPassword
-          ? cachedPassword
-          : window.prompt('Enter host password for this room:') || '')
-        : '';
-
-      if (needsPassword && !password) {
-        alert('Host password is required to enter this room.');
-        return;
-      }
-
-      if (!needsPassword) {
-        state.iAmHost = true;
-        state.wasHost = true;
-        joinAsHost();
-        return;
-      }
-
-      socket.emit('auth-host-room', { roomName: room, password }, (authResp) => {
-        if (authResp?.ok) {
-          sessionStorage.setItem(`hostPassword:${room}`, password);
-          sessionStorage.setItem(`hostAccess:${room}`, '1');
-          state.iAmHost = true;
-          state.wasHost = true;
-          joinAsHost();
-        } else {
-          alert(authResp?.error || 'Invalid password.');
-        }
-      });
-    });
+    joinRoomAsHost(room);
   };
 }
 
@@ -1273,6 +1330,13 @@ if (dom.leaveBtn) {
     window.location.reload();
   };
 }
+
+window.addEventListener('load', () => {
+  const { roomValue, roleParam } = applyRoomQueryDefaults();
+  if (roleParam === 'host' && roomValue) {
+    autoJoinHostRoom(roomValue);
+  }
+});
 
 function generateQR(url) {
   const container = $('qrcode');
@@ -1301,16 +1365,6 @@ function updateLink(roomSlug) {
 }
 
 socket.on('user-joined', ({ id, name }) => {
-  if (state.iAmHost && state.isPrivateMode) {
-    const allowed = state.allowedGuests.some(
-      (g) => g.toLowerCase() === name.toLowerCase()
-    );
-    if (!allowed) {
-      socket.emit('kick-user', id);
-      return;
-    }
-  }
-
   const privateLog = $('chatLogPrivate');
   appendChat(privateLog, 'System', `${name} joined room`, Date.now());
 
@@ -1351,6 +1405,11 @@ socket.on('room-update', ({ locked, streamTitle, ownerId, users }) => {
   if (state.overlayActive) {
     renderHTMLLayout(state.currentRawHTML);
   }
+});
+
+socket.on('vip-codes-updated', (codes) => {
+  state.vipCodes = Array.isArray(codes) ? codes : [];
+  renderVipCodes();
 });
 
 socket.on('role', async ({ isHost }) => {
@@ -1416,16 +1475,25 @@ if (dom.slugInput) {
   };
 }
 
-if (dom.togglePrivateBtn) {
-  dom.togglePrivateBtn.onclick = () => {
-    state.isPrivateMode = !state.isPrivateMode;
+function applyPrivacyState(isPrivate, { emitUpdate = true } = {}) {
+  state.isPrivateMode = !!isPrivate;
+
+  if (dom.togglePrivateBtn) {
     dom.togglePrivateBtn.textContent = state.isPrivateMode ? 'ON' : 'OFF';
     dom.togglePrivateBtn.className = state.isPrivateMode
       ? 'btn small danger'
       : 'btn small secondary';
+  }
 
-    if (dom.guestListPanel) {
-      dom.guestListPanel.style.display = state.isPrivateMode ? 'block' : 'none';
+  if (dom.publicRoomToggle) {
+    dom.publicRoomToggle.checked = !state.isPrivateMode;
+  }
+
+    if (state.currentRoom) {
+      socket.emit('update-room-privacy', {
+        roomName: state.currentRoom,
+        privacy: state.isPrivateMode ? 'private' : 'public'
+      });
     }
 
     if (state.isPrivateMode) {
@@ -1494,7 +1562,9 @@ function renderVipCodes() {
     if (typeof entry === 'string') {
       tag.textContent = entry;
     } else {
-      const remaining = Math.max(0, (entry.maxUses || 0) - (entry.used || 0));
+      const remaining = Number.isFinite(entry.usesLeft)
+        ? entry.usesLeft
+        : Math.max(0, (entry.maxUses || 0) - (entry.used || 0));
       tag.textContent = `${entry.code} (${remaining}/${entry.maxUses})`;
     }
     dom.vipCodeList.appendChild(tag);
@@ -1530,7 +1600,7 @@ if (dom.generateVipCodeBtn) {
         state.vipCodes.push({
           code: resp.code,
           maxUses: resp.maxUses || maxUses || 1,
-          used: 0
+          usesLeft: resp.usesLeft ?? resp.maxUses ?? maxUses ?? 1
         });
         renderVipCodes();
         setVipStatus('VIP code generated.');
@@ -1791,6 +1861,14 @@ function renderUserList() {
           ' <span title="Requesting to Join Stream">✋</span>';
       }
 
+      if (u.isVip) {
+        const vipBadge = document.createElement('span');
+        vipBadge.textContent = ' VIP';
+        vipBadge.style.cssText =
+          'margin-left:6px; font-size:0.6rem; color:#000; background:var(--accent); padding:2px 5px; border-radius:4px;';
+        nameSpan.appendChild(vipBadge);
+      }
+
       const statsBadge = document.createElement('small');
       statsBadge.id = `stats-${u.id}`;
       statsBadge.style.cssText = 'margin-left:8px; font-size:0.6rem; opacity:0.7;';
@@ -1824,7 +1902,11 @@ function renderUserList() {
         callBtn.style.color = 'var(--danger)';
         callBtn.onclick = () => endPeerCall(u.id);
       } else {
-        callBtn.textContent = u.requestingCall ? 'Accept & Call' : 'Call';
+        if (u.requestingCall) {
+          callBtn.textContent = u.isVip ? 'Accept & Call VIP' : 'Accept & Call';
+        } else {
+          callBtn.textContent = u.isVip ? 'Call VIP' : 'Call';
+        }
         if (u.requestingCall) callBtn.style.borderColor = 'var(--accent)';
         callBtn.onclick = () => window.ringUser(u.id);
       }

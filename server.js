@@ -1,4 +1,3 @@
-const fs = require('fs');
 const path = require('path');
 const express = require('express');
 const http = require('http');
@@ -29,185 +28,74 @@ app.use(express.static(path.join(__dirname, 'public')));
 
 // In-memory room state (per room: owner, lock state, users)
 const rooms = Object.create(null);
-const DATA_DIR = path.join(__dirname, 'data');
-const ROOMS_FILE = path.join(DATA_DIR, 'rooms.json');
-const DEFAULT_ROOMS_STORE = { rooms: {} };
-let roomsStore = loadRoomsStore();
-let roomsWritePromise = Promise.resolve();
 const vipTokens = new Map();
+
+// Persistent room registry (in-memory for now, structured for easy DB swap).
+const roomDirectory = {
+  rooms: Object.create(null)
+};
 
 function normalizeRoomName(roomName) {
   if (!roomName || typeof roomName !== 'string') return '';
   return roomName.trim().slice(0, 50);
 }
 
-function ensureRoomsFile() {
-  if (!fs.existsSync(DATA_DIR)) {
-    fs.mkdirSync(DATA_DIR, { recursive: true });
-  }
-  if (!fs.existsSync(ROOMS_FILE)) {
-    fs.writeFileSync(ROOMS_FILE, JSON.stringify(DEFAULT_ROOMS_STORE, null, 2));
-  }
+function normalizeVipCode(value) {
+  if (!value || typeof value !== 'string') return '';
+  return value.trim().toUpperCase();
 }
 
-function normalizeStoredRoom(record) {
-  if (!record || typeof record !== 'object') return false;
-  let changed = false;
-  if (record.owner && !record.ownerId) {
-    record.ownerId = record.owner;
-    delete record.owner;
-    changed = true;
-  }
-  if (record.ownerId === undefined) {
-    record.ownerId = null;
-    changed = true;
-  }
-  if (!Array.isArray(record.vipUsers)) {
-    record.vipUsers = [];
-    changed = true;
-  }
-  if (!record.vipCodes || typeof record.vipCodes !== 'object' || Array.isArray(record.vipCodes)) {
-    const legacyCodes = Array.isArray(record.vipCodes) ? record.vipCodes : [];
-    record.vipCodes = {};
-    legacyCodes.forEach((code) => {
-      const normalized = normalizeVipCode(code);
-      if (!normalized) return;
-      record.vipCodes[normalized] = { maxUses: 1, used: 0 };
-    });
-    changed = true;
-  } else {
-    Object.entries(record.vipCodes).forEach(([code, meta]) => {
-      const normalized = normalizeVipCode(code);
-      if (!normalized) {
-        delete record.vipCodes[code];
-        changed = true;
-        return;
-      }
-      if (!meta || typeof meta !== 'object') {
-        record.vipCodes[normalized] = { maxUses: 1, used: 0 };
-        if (code !== normalized) delete record.vipCodes[code];
-        changed = true;
-        return;
-      }
-      if (typeof meta.maxUses !== 'number' || meta.maxUses < 1) {
-        meta.maxUses = 1;
-        changed = true;
-      }
-      if (typeof meta.used !== 'number' || meta.used < 0) {
-        meta.used = 0;
-        changed = true;
-      }
-      if (code !== normalized) {
-        record.vipCodes[normalized] = meta;
-        delete record.vipCodes[code];
-        changed = true;
-      }
-    });
-  }
-  if (typeof record.paid !== 'boolean') {
-    record.paid = false;
-    changed = true;
-  }
-  return changed;
+function buildRoomRecord({ roomName, ownerPassword, privacy }) {
+  return {
+    roomName,
+    ownerPassword: ownerPassword ? String(ownerPassword) : null,
+    privacy: privacy === 'private' ? 'private' : 'public',
+    isLive: false,
+    vipCodes: {},
+    createdAt: Date.now(),
+    title: null,
+    viewers: 0,
+    vipUsers: []
+  };
 }
 
-function loadRoomsStore() {
-  ensureRoomsFile();
-  try {
-    const raw = fs.readFileSync(ROOMS_FILE, 'utf8');
-    if (!raw.trim()) return { rooms: {} };
-    const parsed = JSON.parse(raw);
-    if (!parsed || typeof parsed !== 'object' || typeof parsed.rooms !== 'object') {
-      fs.writeFileSync(ROOMS_FILE, JSON.stringify(DEFAULT_ROOMS_STORE, null, 2));
-      return { rooms: {} };
-    }
-    let changed = false;
-    Object.values(parsed.rooms).forEach((room) => {
-      if (normalizeStoredRoom(room)) changed = true;
-    });
-    if (changed) {
-      fs.writeFileSync(ROOMS_FILE, JSON.stringify(parsed, null, 2));
-    }
-    return parsed;
-  } catch (error) {
-    fs.writeFileSync(ROOMS_FILE, JSON.stringify(DEFAULT_ROOMS_STORE, null, 2));
-    return { rooms: {} };
-  }
-}
-
-function queueRoomsWrite() {
-  const payload = JSON.stringify(roomsStore, null, 2);
-  const writeTask = roomsWritePromise.then(() => fs.promises.writeFile(ROOMS_FILE, payload));
-  roomsWritePromise = writeTask.catch(() => {});
-  return writeTask;
-}
-
-function getStoredRoom(roomName) {
+function getRoomRecord(roomName) {
   const name = normalizeRoomName(roomName);
   if (!name) return null;
-  const record = roomsStore.rooms[name] || null;
-  if (record) normalizeStoredRoom(record);
-  return record;
+  return roomDirectory.rooms[name] || null;
+}
+
+function createRoomRecord({ roomName, ownerPassword, privacy }) {
+  const name = normalizeRoomName(roomName);
+  if (!name) return { ok: false, error: 'Invalid room name.' };
+  if (roomDirectory.rooms[name]) return { ok: false, error: 'Room already exists.' };
+  const record = buildRoomRecord({ roomName: name, ownerPassword, privacy });
+  roomDirectory.rooms[name] = record;
+  return { ok: true, room: record };
+}
+
+function updateRoomRecord(roomName, updater) {
+  const name = normalizeRoomName(roomName);
+  if (!name) return { ok: false, error: 'Invalid room name.' };
+  const existing = roomDirectory.rooms[name];
+  if (!existing) return { ok: false, error: 'Room not found.' };
+  updater(existing);
+  return { ok: true, room: existing };
 }
 
 function listPublicRooms() {
-  return Object.values(roomsStore.rooms)
-    .filter((room) => room.privacy === 'public')
+  return Object.values(roomDirectory.rooms)
+    .filter((room) => room.privacy === 'public' && room.isLive)
     .map((room) => ({
-      name: room.name,
+      name: room.roomName,
       viewers: typeof room.viewers === 'number' ? room.viewers : 0,
       title: room.title || null,
-      live: !!room.live
+      live: !!room.isLive
     }));
 }
 
-async function createStoredRoom({ name, password, privacy, owner }) {
-  const roomName = normalizeRoomName(name);
-  if (!roomName) return { ok: false, error: 'Invalid room name.' };
-  if (roomsStore.rooms[roomName]) {
-    return { ok: false, error: 'Room already claimed.' };
-  }
-  const record = {
-    name: roomName,
-    password: String(password || ''),
-    privacy: privacy === 'private' ? 'private' : 'public',
-    ownerId: owner || null,
-    created: new Date().toISOString(),
-    live: false,
-    viewers: 0,
-    title: null,
-    vipUsers: [],
-    vipCodes: {},
-    paid: false
-  };
-  roomsStore.rooms[roomName] = record;
-  try {
-    await queueRoomsWrite();
-    return { ok: true, room: record };
-  } catch (error) {
-    delete roomsStore.rooms[roomName];
-    return { ok: false, error: 'Unable to save room.' };
-  }
-}
-
-async function updateStoredRoom(roomName, updater) {
-  const name = normalizeRoomName(roomName);
-  if (!name) return { ok: false, error: 'Invalid room name.' };
-  const existing = roomsStore.rooms[name];
-  if (!existing) return { ok: false, error: 'Room not found.' };
-  const previous = { ...existing };
-  updater(existing);
-  try {
-    await queueRoomsWrite();
-    return { ok: true, room: existing };
-  } catch (error) {
-    roomsStore.rooms[name] = previous;
-    return { ok: false, error: 'Unable to save room.' };
-  }
-}
-
 function getRoomDirectoryEntry(roomName) {
-  return getStoredRoom(roomName);
+  return getRoomRecord(roomName);
 }
 
 function getRoomInfo(roomName) {
@@ -222,32 +110,26 @@ function getRoomInfo(roomName) {
   return rooms[roomName];
 }
 
-function normalizeVipCode(value) {
-  if (!value || typeof value !== 'string') return '';
-  return value.trim().toUpperCase();
-}
-
-function isVipForRoom(record, displayName) {
-  if (!record) return false;
-  const normalizedName = (displayName || '').trim().toLowerCase();
-  const vipByName = normalizedName
-    ? record.vipUsers.some((user) => String(user).trim().toLowerCase() === normalizedName)
-    : false;
-  return vipByName;
-}
-
 function listVipCodes(record) {
   if (!record || !record.vipCodes) return [];
   return Object.entries(record.vipCodes).map(([code, meta]) => ({
     code,
     maxUses: meta.maxUses,
-    used: meta.used
+    usesLeft: meta.usesLeft
   }));
 }
 
-function isRoomClaimed(roomName) {
+function emitVipCodesUpdate(roomName) {
+  const info = rooms[roomName];
+  if (!info || !info.ownerId) return;
   const record = getStoredRoom(roomName);
-  return !!(record && (record.ownerId || record.password));
+  if (!record) return;
+  io.to(info.ownerId).emit('vip-codes-updated', listVipCodes(record));
+}
+
+function isRoomClaimed(roomName) {
+  const record = getRoomRecord(roomName);
+  return !!record;
 }
 
 function issueVipToken(roomName) {
@@ -328,81 +210,143 @@ io.on('connection', (socket) => {
     socket.emit('public-rooms', listPublicRooms());
   });
 
-  socket.on('claim-room', async ({ name, password, public: isPublic } = {}, callback) => {
+  socket.on('claim-room', ({ name, password, privacy } = {}, callback) => {
     const reply = typeof callback === 'function' ? callback : () => {};
-    if (!name || !password) {
+    const roomName = normalizeRoomName(name);
+    if (!roomName || !password) {
       reply({ ok: false, error: 'Room name and password are required.' });
       return;
     }
-    const result = await createStoredRoom({
-      name,
-      password,
-      privacy: isPublic ? 'public' : 'private',
-      owner: socket.id
+    const record = getRoomRecord(roomName);
+    if (!record) {
+      const result = createRoomRecord({
+        roomName,
+        ownerPassword: password,
+        privacy
+      });
+      reply(result.ok ? { ok: true } : { ok: false, error: result.error });
+      return;
+    }
+    if (record.ownerPassword) {
+      if (record.ownerPassword !== String(password || '')) {
+        reply({ ok: false, error: 'Invalid room password.' });
+        return;
+      }
+      reply({ ok: true });
+      return;
+    }
+    updateRoomRecord(roomName, (room) => {
+      room.ownerPassword = String(password);
+      room.privacy = privacy === 'private' ? 'private' : 'public';
     });
-    reply(result.ok ? { ok: true } : { ok: false, error: result.error });
+    reply({ ok: true });
+  });
+
+  socket.on('enter-host-room', ({ roomName, password, privacy } = {}, callback) => {
+    const reply = typeof callback === 'function' ? callback : () => {};
+    const normalizedName = normalizeRoomName(roomName);
+    if (!normalizedName) {
+      reply({ ok: false, error: 'Room name is required.' });
+      return;
+    }
+    const record = getRoomRecord(normalizedName);
+    if (!record) {
+      const result = createRoomRecord({
+        roomName: normalizedName,
+        ownerPassword: password || null,
+        privacy: privacy === 'private' ? 'private' : 'public'
+      });
+      if (result.ok && password) {
+        if (!socket.data.hostAuthRooms) socket.data.hostAuthRooms = new Set();
+        socket.data.hostAuthRooms.add(normalizedName);
+      }
+      reply(result.ok ? { ok: true, created: true } : { ok: false, error: result.error });
+      return;
+    }
+    if (record.ownerPassword) {
+      if (record.ownerPassword !== String(password || '')) {
+        reply({ ok: false, error: 'Invalid room password.' });
+        return;
+      }
+      if (!socket.data.hostAuthRooms) socket.data.hostAuthRooms = new Set();
+      socket.data.hostAuthRooms.add(normalizedName);
+    }
+    reply({ ok: true, created: false });
+  });
+
+  socket.on('get-room-info', ({ roomName } = {}, callback) => {
+    const reply = typeof callback === 'function' ? callback : () => {};
+    const record = getRoomRecord(roomName);
+    reply({
+      exists: !!record,
+      privacy: record ? record.privacy : 'public',
+      hasOwnerPassword: !!(record && record.ownerPassword)
+    });
   });
 
   socket.on('check-room-claimed', ({ roomName } = {}, callback) => {
     const reply = typeof callback === 'function' ? callback : () => {};
-    const record = getStoredRoom(roomName);
+    const record = getRoomRecord(roomName);
     const claimed = !!record;
-    const hasPassword = !!(record && record.password);
+    const hasPassword = !!(record && record.ownerPassword);
     reply({ claimed, hasPassword });
   });
 
   socket.on('auth-host-room', ({ name, roomName, password } = {}, callback) => {
     const reply = typeof callback === 'function' ? callback : () => {};
     const targetName = roomName || name;
-    const record = getStoredRoom(targetName);
+    const record = getRoomRecord(targetName);
     if (!record) {
       reply({ ok: false, error: 'Room not found.' });
       return;
     }
-    if (record.password !== String(password || '')) {
+    if (record.ownerPassword !== String(password || '')) {
       reply({ ok: false, error: 'Invalid room password.' });
       return;
     }
     if (!socket.data.hostAuthRooms) socket.data.hostAuthRooms = new Set();
-    socket.data.hostAuthRooms.add(record.name);
+    socket.data.hostAuthRooms.add(record.roomName);
     reply({ ok: true });
   });
 
   socket.on('host-login', ({ name, password } = {}, callback) => {
     const reply = typeof callback === 'function' ? callback : () => {};
-    const record = getStoredRoom(name);
+    const record = getRoomRecord(name);
     if (!record) {
       reply({ ok: false, error: 'Room not found.' });
       return;
     }
-    if (record.password !== String(password || '')) {
+    if (record.ownerPassword !== String(password || '')) {
       reply({ ok: false, error: 'Invalid room password.' });
       return;
     }
     reply({ ok: true });
   });
 
-  socket.on('update-room-privacy', async ({ name, privacy } = {}, callback) => {
+  socket.on('update-room-privacy', ({ roomName, privacy, name } = {}, callback) => {
     const reply = typeof callback === 'function' ? callback : () => {};
-    if (!name || !privacy) {
+    const targetName = roomName || name;
+    if (!targetName || !privacy) {
       reply({ ok: false, error: 'Room name and privacy are required.' });
       return;
     }
     const normalizedPrivacy = privacy === 'private' ? 'private' : 'public';
-    const result = await updateStoredRoom(name, (room) => {
+    const result = updateRoomRecord(targetName, (room) => {
       room.privacy = normalizedPrivacy;
     });
     reply(result.ok ? { ok: true } : { ok: false, error: result.error });
   });
 
-  socket.on('update-room-live', async ({ name, live, viewers, title } = {}, callback) => {
+  socket.on('update-room-live', ({ roomName, name, isLive, live, viewers, title } = {}, callback) => {
     const reply = typeof callback === 'function' ? callback : () => {};
-    if (!name) {
+    const targetName = roomName || name;
+    if (!targetName) {
       reply({ ok: false, error: 'Room name is required.' });
       return;
     }
-    const result = await updateStoredRoom(name, (room) => {
-      if (typeof live === 'boolean') room.live = live;
+    const result = updateRoomRecord(targetName, (room) => {
+      if (typeof isLive === 'boolean') room.isLive = isLive;
+      if (typeof live === 'boolean') room.isLive = live;
       if (typeof viewers === 'number' && Number.isFinite(viewers)) {
         room.viewers = Math.max(0, Math.floor(viewers));
       }
@@ -413,7 +357,7 @@ io.on('connection', (socket) => {
     reply(result.ok ? { ok: true } : { ok: false, error: result.error });
   });
 
-  socket.on('add-vip-user', async ({ room, userName } = {}, callback) => {
+  socket.on('add-vip-user', ({ room, userName } = {}, callback) => {
     const reply = typeof callback === 'function' ? callback : () => {};
     const roomName = normalizeRoomName(room);
     const trimmedName = typeof userName === 'string' ? userName.trim() : '';
@@ -426,8 +370,7 @@ io.on('connection', (socket) => {
       reply({ ok: false, error: 'Only the host can add VIP users.' });
       return;
     }
-    const result = await updateStoredRoom(roomName, (storedRoom) => {
-      normalizeStoredRoom(storedRoom);
+    const result = updateRoomRecord(roomName, (storedRoom) => {
       const exists = storedRoom.vipUsers.some(
         (user) => String(user).trim().toLowerCase() === trimmedName.toLowerCase()
       );
@@ -440,7 +383,7 @@ io.on('connection', (socket) => {
     reply({ ok: true });
   });
 
-  socket.on('generate-vip-code', async ({ room, maxUses } = {}, callback) => {
+  socket.on('generate-vip-code', ({ room, maxUses } = {}, callback) => {
     const reply = typeof callback === 'function' ? callback : () => {};
     const roomName = normalizeRoomName(room);
     if (!roomName) {
@@ -454,15 +397,14 @@ io.on('connection', (socket) => {
     }
     const code = generateVipCode(6);
     const normalizedMaxUses = Number.isFinite(maxUses) ? Math.max(1, Math.floor(maxUses)) : 1;
-    const result = await updateStoredRoom(roomName, (storedRoom) => {
-      normalizeStoredRoom(storedRoom);
-      storedRoom.vipCodes[code] = { maxUses: normalizedMaxUses, used: 0 };
+    const result = updateRoomRecord(roomName, (storedRoom) => {
+      storedRoom.vipCodes[code] = { maxUses: normalizedMaxUses, usesLeft: normalizedMaxUses };
     });
     if (!result.ok) {
       reply({ ok: false, error: result.error });
       return;
     }
-    reply({ ok: true, code, maxUses: normalizedMaxUses });
+    reply({ ok: true, code, maxUses: normalizedMaxUses, usesLeft: normalizedMaxUses });
   });
 
   socket.on('get-vip-codes', ({ roomName, room } = {}, callback) => {
@@ -477,7 +419,7 @@ io.on('connection', (socket) => {
       reply({ ok: false, error: 'Only the host can view VIP codes.' });
       return;
     }
-    const record = getStoredRoom(targetName);
+    const record = getRoomRecord(targetName);
     if (!record) {
       reply({ ok: false, error: 'Room not found.' });
       return;
@@ -485,33 +427,32 @@ io.on('connection', (socket) => {
     reply({ ok: true, codes: listVipCodes(record) });
   });
 
-  socket.on('redeem-vip-code', async ({ code, desiredName } = {}, callback) => {
+  socket.on('redeem-vip-code', ({ code, desiredName } = {}, callback) => {
     const reply = typeof callback === 'function' ? callback : () => {};
     const normalized = normalizeVipCode(code);
     if (!normalized) {
       reply({ ok: false, reason: 'invalid or exhausted' });
       return;
     }
-    const entries = Object.values(roomsStore.rooms);
+    const entries = Object.values(roomDirectory.rooms);
     const targetRoom = entries.find((room) => room.vipCodes && room.vipCodes[normalized]);
     if (!targetRoom) {
       reply({ ok: false, reason: 'invalid or exhausted' });
       return;
     }
     const meta = targetRoom.vipCodes[normalized];
-    if (!meta || meta.used >= meta.maxUses) {
+    if (!meta || meta.usesLeft <= 0) {
       reply({ ok: false, reason: 'invalid or exhausted' });
       return;
     }
     let exhausted = false;
-    const result = await updateStoredRoom(targetRoom.name, (storedRoom) => {
-      normalizeStoredRoom(storedRoom);
+    const result = updateRoomRecord(targetRoom.roomName, (storedRoom) => {
       const liveMeta = storedRoom.vipCodes[normalized];
-      if (!liveMeta || liveMeta.used >= liveMeta.maxUses) {
+      if (!liveMeta || liveMeta.usesLeft <= 0) {
         exhausted = true;
         return;
       }
-      liveMeta.used += 1;
+      liveMeta.usesLeft -= 1;
     });
     if (!result.ok) {
       reply({ ok: false, reason: 'invalid or exhausted' });
@@ -521,16 +462,22 @@ io.on('connection', (socket) => {
       reply({ ok: false, reason: 'invalid or exhausted' });
       return;
     }
+    emitVipCodesUpdate(targetRoom.name);
     if (!socket.data.vipRooms) socket.data.vipRooms = new Set();
-    socket.data.vipRooms.add(targetRoom.name);
-    const vipToken = issueVipToken(targetRoom.name);
-    reply({ ok: true, roomName: targetRoom.name, role: 'vip', vipToken, desiredName });
+    socket.data.vipRooms.add(targetRoom.roomName);
+    const vipToken = issueVipToken(targetRoom.roomName);
+    reply({ ok: true, roomName: targetRoom.roomName, role: 'vip', vipToken, desiredName });
+
+    const roomInfo = rooms[targetRoom.roomName];
+    if (roomInfo?.ownerId) {
+      io.to(roomInfo.ownerId).emit('vip-codes-updated', listVipCodes(targetRoom));
+    }
   });
 
   // ======================================================
   // ROOM JOIN + ROLE ASSIGNMENT
   // ======================================================
-  socket.on('join-room', async ({ room, name, isViewer, vipCode, vipToken } = {}, callback) => {
+  socket.on('join-room', ({ room, name, isViewer, vipCode, vipToken } = {}, callback) => {
     const reply = typeof callback === 'function' ? callback : () => {};
     if (!room || typeof room !== 'string') {
       reply({ ok: false, error: 'Invalid room' });
@@ -545,7 +492,7 @@ io.on('connection', (socket) => {
     const info = getRoomInfo(roomName);
     let directoryEntry = getRoomDirectoryEntry(roomName);
     if (directoryEntry && !directoryEntry.title) {
-      updateStoredRoom(roomName, (storedRoom) => {
+      updateRoomRecord(roomName, (storedRoom) => {
         storedRoom.title = info.streamTitle;
       });
     }
@@ -564,7 +511,7 @@ io.on('connection', (socket) => {
     // Host access rules:
     // - Unclaimed rooms: first host joins without password and claims the room.
     // - Claimed rooms with a password: host must authenticate before joining.
-    if (wantsHost && isClaimed && directoryEntry?.password) {
+    if (wantsHost && isClaimed && directoryEntry?.ownerPassword) {
       const authed = socket.data.hostAuthRooms && socket.data.hostAuthRooms.has(roomName);
       if (!authed) {
         reply({ ok: false, error: 'Host password required.' });
@@ -573,11 +520,10 @@ io.on('connection', (socket) => {
     }
 
     if (wantsHost && !directoryEntry) {
-      const created = await createStoredRoom({
-        name: roomName,
-        password: '',
-        privacy: 'public',
-        owner: socket.id
+      const created = createRoomRecord({
+        roomName,
+        ownerPassword: null,
+        privacy: 'public'
       });
       if (!created.ok) {
         reply({ ok: false, error: created.error });
@@ -600,32 +546,28 @@ io.on('connection', (socket) => {
     if (viewerMode && vipCode && directoryEntry?.vipCodes) {
       const normalized = normalizeVipCode(vipCode);
       const meta = normalized ? directoryEntry.vipCodes[normalized] : null;
-      if (meta && meta.used < meta.maxUses) {
+      if (meta && meta.usesLeft > 0) {
         let exhausted = false;
-        const result = await updateStoredRoom(roomName, (storedRoom) => {
-          normalizeStoredRoom(storedRoom);
+        const result = updateRoomRecord(roomName, (storedRoom) => {
           const liveMeta = storedRoom.vipCodes[normalized];
-          if (!liveMeta || liveMeta.used >= liveMeta.maxUses) {
+          if (!liveMeta || liveMeta.usesLeft <= 0) {
             exhausted = true;
             return;
           }
-          liveMeta.used += 1;
+          liveMeta.usesLeft -= 1;
         });
         if (result.ok && !exhausted) {
           vipByCode = true;
+          emitVipCodesUpdate(roomName);
         }
       }
     }
 
     const isVip =
-      viewerMode &&
-      (isVipForRoom(directoryEntry, displayName) ||
-        vipByCode ||
-        (vipRooms && vipRooms.has(roomName)) ||
-        vipTokenAccepted);
+      viewerMode && (vipByCode || (vipRooms && vipRooms.has(roomName)) || vipTokenAccepted);
 
     if (viewerMode && directoryEntry?.privacy === 'private' && !isVip) {
-      reply({ ok: false, error: 'This room is private · VIPs only' });
+      reply({ ok: false, error: vipCode ? 'Invalid or exhausted VIP code.' : 'VIP code required.' });
       return;
     }
 
@@ -640,9 +582,9 @@ io.on('connection', (socket) => {
       info.ownerId = socket.id;
     }
 
-    if (!viewerMode && directoryEntry && directoryEntry.ownerId !== socket.id) {
-      updateStoredRoom(roomName, (storedRoom) => {
-        storedRoom.ownerId = socket.id;
+    if (viewerMode && directoryEntry) {
+      updateRoomRecord(roomName, (storedRoom) => {
+        storedRoom.viewers = Math.max(0, (storedRoom.viewers || 0) + 1);
       });
     }
 
@@ -663,12 +605,18 @@ io.on('connection', (socket) => {
     broadcastRoomUpdate(roomName);
     const response = { ok: true, isVip, isHost };
     if (isHost && directoryEntry) {
-      normalizeStoredRoom(directoryEntry);
       response.vipUsers = [...directoryEntry.vipUsers];
       response.vipCodes = listVipCodes(directoryEntry);
       response.privacy = directoryEntry.privacy;
     }
     reply(response);
+
+    if (viewerMode && vipByCode && directoryEntry) {
+      const hostId = info.ownerId;
+      if (hostId) {
+        io.to(hostId).emit('vip-codes-updated', listVipCodes(directoryEntry));
+      }
+    }
   });
 
   // Viewer "raise hand" request (host receives a prompt)
@@ -725,7 +673,7 @@ io.on('connection', (socket) => {
     info.streamTitle = (title || 'Untitled Stream').slice(0, 100);
     const directoryEntry = getRoomDirectoryEntry(roomName);
     if (directoryEntry) {
-      updateStoredRoom(roomName, (storedRoom) => {
+      updateRoomRecord(roomName, (storedRoom) => {
         storedRoom.title = info.streamTitle;
       });
     }
@@ -831,7 +779,7 @@ io.on('connection', (socket) => {
     info.users.delete(socket.id);
     const directoryEntry = getRoomDirectoryEntry(roomName);
     if (directoryEntry && socket.data.isViewer) {
-      updateStoredRoom(roomName, (storedRoom) => {
+      updateRoomRecord(roomName, (storedRoom) => {
         storedRoom.viewers = Math.max(0, (storedRoom.viewers || 0) - 1);
       });
     }
@@ -839,8 +787,8 @@ io.on('connection', (socket) => {
     if (info.ownerId === socket.id) {
       info.ownerId = null;
       if (directoryEntry) {
-        updateStoredRoom(roomName, (storedRoom) => {
-          storedRoom.live = false;
+        updateRoomRecord(roomName, (storedRoom) => {
+          storedRoom.isLive = false;
         });
       }
     }
