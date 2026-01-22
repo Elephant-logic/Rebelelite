@@ -115,8 +115,15 @@ let mixerLayout = 'SOLO'; //
 let activeGuestId = null; //
 
 let overlayActive = false; //
-let overlayImage = new Image(); //
 let currentRawHTML = ""; //
+let overlayRoot = null; //
+const overlayState = {
+    active: false,
+    image: new Image(),
+    templateRaw: '',
+    fieldIds: [],
+    needsRedraw: false
+};
 
 const viewerPeers = {}; //
 const callPeers = {}; //
@@ -233,8 +240,8 @@ function drawMixer(timestamp) {
         }
     }
 
-    if (overlayActive && overlayImage.complete) {
-        ctx.drawImage(overlayImage, 0, 0, canvas.width, canvas.height); //
+    if (overlayActive) {
+        drawOverlay(ctx); //
     }
 }
 
@@ -366,39 +373,166 @@ function buildChatHTMLFromLogs(maxLines = 12) {
     }).join('');
 }
 
-function renderHTMLLayout(htmlString) {
-    if (!htmlString) return; //
-    currentRawHTML = htmlString; //
+function ensureOverlayRoot() {
+    if (overlayRoot) return; //
+    overlayRoot = document.createElement('div'); //
+    overlayRoot.id = 'htmlOverlayRoot'; //
+    overlayRoot.style.cssText = [
+        'position:fixed',
+        'left:-99999px',
+        'top:0',
+        'width:1920px',
+        'height:1080px',
+        'overflow:hidden',
+        'pointer-events:none',
+        'opacity:0'
+    ].join(';'); //
+    document.body.appendChild(overlayRoot); //
+}
 
-    // Separate Viewers from Guests for stats
+function applyOverlayTemplateTokens(htmlString) {
+    if (!htmlString) return ''; //
     const viewerCount = latestUserList.filter(u => u.isViewer).length; //
     const guestCount = latestUserList.filter(u => !u.isViewer).length; //
     const streamTitle = $('streamTitleInput') ? $('streamTitleInput').value : "Rebel Stream"; //
-
-    // Build chat HTML block from current public chat
     const chatHTML = buildChatHTMLFromLogs(14); //
 
-    let processedHTML = htmlString
+    return htmlString
         .replace(/{{viewers}}/g, viewerCount)
         .replace(/{{guests}}/g, guestCount)
         .replace(/{{title}}/g, streamTitle)
         .replace(/{{chat}}/g, chatHTML); //
+}
 
-    const svg = `
+function getOverlayFieldValues() {
+    if (!overlayRoot) return {}; //
+    const values = {}; //
+    overlayState.fieldIds.forEach(id => {
+        const el = overlayRoot.querySelector(`#${escapeOverlaySelector(id)}`); //
+        if (el) values[id] = el.innerHTML; //
+    }); //
+    return values; //
+}
+
+function escapeOverlaySelector(id) {
+    if (window.CSS && CSS.escape) return CSS.escape(id); //
+    return id.replace(/([ #;?%&,.+*~\':"!^$[\]()=>|\/@])/g, '\\$1'); //
+}
+
+function detectOverlayFields() {
+    if (!overlayRoot) return []; //
+    const ids = Array.from(overlayRoot.querySelectorAll('[id]')) //
+        .map(el => el.id) //
+        .filter(Boolean); //
+    return Array.from(new Set(ids)); //
+}
+
+function buildOverlayFieldsUI() {
+    const fieldsContainer = $('overlayFields'); //
+    if (!fieldsContainer) return; //
+
+    fieldsContainer.innerHTML = ''; //
+    if (!overlayState.fieldIds.length) {
+        const empty = document.createElement('div'); //
+        empty.style.cssText = "font-size:0.7rem; color:var(--muted); text-align:center;"; //
+        empty.textContent = "No editable fields detected."; //
+        fieldsContainer.appendChild(empty); //
+        return;
+    }
+
+    overlayState.fieldIds.forEach(id => {
+        const wrap = document.createElement('div'); //
+        wrap.className = 'overlay-field'; //
+
+        const label = document.createElement('label'); //
+        label.textContent = `#${id}`; //
+        wrap.appendChild(label); //
+
+        const textarea = document.createElement('textarea'); //
+        const target = overlayRoot.querySelector(`#${escapeOverlaySelector(id)}`); //
+        textarea.value = target ? target.innerHTML : ''; //
+        wrap.appendChild(textarea); //
+
+        const btn = document.createElement('button'); //
+        btn.className = 'btn small secondary full-width'; //
+        btn.textContent = 'Apply'; //
+        btn.addEventListener('click', () => {
+            updateOverlayField(id, textarea.value); //
+        }); //
+        wrap.appendChild(btn); //
+
+        fieldsContainer.appendChild(wrap); //
+    }); //
+}
+
+function updateOverlayField(id, html) {
+    if (!overlayRoot) return; //
+    const target = overlayRoot.querySelector(`#${escapeOverlaySelector(id)}`); //
+    if (!target) return; //
+    target.innerHTML = html; //
+    overlayState.needsRedraw = true; //
+}
+
+function buildOverlaySVG() {
+    if (!overlayRoot) return ''; //
+    const content = overlayRoot.innerHTML; //
+    return `
         <svg xmlns="http://www.w3.org/2000/svg" width="1920" height="1080">
             <foreignObject width="100%" height="100%">
                 <div xmlns="http://www.w3.org/1999/xhtml" class="layout-${mixerLayout}" style="width:100%; height:100%; margin:0; padding:0;">
-                    ${processedHTML}
+                    ${content}
                 </div>
             </foreignObject>
         </svg>`; //
+}
 
+function refreshOverlayImage() {
+    const svg = buildOverlaySVG(); //
+    if (!svg) return; //
     try {
-        overlayImage.src = 'data:image/svg+xml;base64,' + btoa(unescape(encodeURIComponent(svg))); //
-        overlayActive = true; //
+        overlayState.image.src = 'data:image/svg+xml;base64,' + btoa(unescape(encodeURIComponent(svg))); //
+        overlayState.needsRedraw = false; //
     } catch (e) {
         console.error("[Overlay] Failed to encode SVG", e); //
     }
+}
+
+function drawOverlay(context) {
+    if (!overlayState.active) return; //
+    if (overlayState.needsRedraw) refreshOverlayImage(); //
+    if (overlayState.image.complete) {
+        context.drawImage(overlayState.image, 0, 0, canvas.width, canvas.height); //
+    }
+}
+
+function renderHTMLLayout(htmlString) {
+    if (!htmlString) return; //
+    ensureOverlayRoot(); //
+    const templateChanged = htmlString !== overlayState.templateRaw; //
+    currentRawHTML = htmlString; //
+    overlayState.templateRaw = htmlString; //
+
+    const previousValues = getOverlayFieldValues(); //
+    const processedHTML = applyOverlayTemplateTokens(htmlString); //
+
+    overlayRoot.innerHTML = processedHTML; //
+    overlayState.fieldIds = detectOverlayFields(); //
+
+    overlayState.fieldIds.forEach(id => {
+        if (!Object.prototype.hasOwnProperty.call(previousValues, id)) return; //
+        const target = overlayRoot.querySelector(`#${escapeOverlaySelector(id)}`); //
+        if (target) target.innerHTML = previousValues[id]; //
+    }); //
+
+    if (templateChanged) {
+        buildOverlayFieldsUI(); //
+    } else if (!$('overlayFields')?.childElementCount) {
+        buildOverlayFieldsUI(); //
+    }
+
+    overlayState.active = true; //
+    overlayActive = true; //
+    overlayState.needsRedraw = true; //
 }
 
 window.setMixerLayout = (mode) => {
@@ -1472,7 +1606,12 @@ if (htmlOverlayInput) {
 
 window.clearOverlay = () => {
     overlayActive = false; //
-    overlayImage = new Image(); //
+    overlayState.active = false; //
+    overlayState.templateRaw = ''; //
+    overlayState.fieldIds = []; //
+    overlayState.needsRedraw = false; //
+    if (overlayRoot) overlayRoot.innerHTML = ''; //
+    buildOverlayFieldsUI(); //
     const overlayStatus = $('overlayStatus'); //
     if (overlayStatus) overlayStatus.textContent = "[Empty]"; //
 };
