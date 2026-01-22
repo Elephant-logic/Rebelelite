@@ -36,9 +36,7 @@ const state = {
   statsInterval: null,
   joined: false,
   roomPrivacy: 'public',
-  paymentEnabled: false,
-  paymentLabel: '',
-  paymentUrl: ''
+  vipRequired: true
 };
 
 // ======================================================
@@ -473,10 +471,14 @@ async function hydrateRoomInfo(roomName) {
   if (info?.privacy) {
     state.roomPrivacy = info.privacy;
   }
+  if (typeof info?.vipRequired === 'boolean') {
+    state.vipRequired = info.vipRequired;
+  }
   const vipLabel = $('viewerVipLabel');
   if (vipLabel) {
+    const required = state.roomPrivacy === 'private' && state.vipRequired;
     vipLabel.textContent =
-      state.roomPrivacy === 'private'
+      required
         ? 'VIP Code (required for private rooms)'
         : 'VIP Code (optional)';
   }
@@ -578,7 +580,7 @@ window.addEventListener('load', () => {
     }
 
     const code = vipInput?.value.trim();
-    if (state.roomPrivacy === 'private' && !code) {
+    if (state.roomPrivacy === 'private' && state.vipRequired && !code) {
       if (joinStatus) joinStatus.textContent = 'VIP code required for this room.';
       return;
     }

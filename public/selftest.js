@@ -119,6 +119,17 @@ async function waitForFrameElements(frame, ids, ms = 5000) {
   throw new Error(`Missing elements: ${lastMissing.join(', ')}`);
 }
 
+let studioFrameLoaded = null;
+function ensureStudioFrameLoaded() {
+  if (studioFrameLoaded) return studioFrameLoaded;
+  if (!studioFrame) return Promise.reject(new Error('Studio iframe missing'));
+  studioFrameLoaded = new Promise((resolve) => {
+    studioFrame.src = '/index.html?selftest=1';
+    studioFrame.onload = () => resolve();
+  });
+  return studioFrameLoaded;
+}
+
 function emitWithAck(socket, event, payload, ms = 5000) {
   return withTimeout(
     new Promise((resolve) => {
@@ -365,17 +376,40 @@ async function testPrivateViewerBlocked() {
     name: context.roomName,
     privacy: 'private'
   });
+  await emitWithAck(context.hostSocket, 'update-vip-required', {
+    roomName: context.roomName,
+    vipRequired: false
+  });
+
+  const openSocket = io({ autoConnect: false });
+  await connectSocket(openSocket);
+  const joinResp = await emitWithAck(openSocket, 'join-room', {
+    room: context.roomName,
+    name: 'NoVipViewer',
+    isViewer: true
+  });
+  openSocket.disconnect();
+  if (!joinResp?.ok) throw new Error('Private room blocked viewer while VIP was off');
+  return 'Private room allowed viewer when VIP requirement is off.';
+}
+
+async function testPrivateVipRequiredBlocked() {
+  if (!context.hostSocket) throw new Error('Host socket not initialized');
+  await emitWithAck(context.hostSocket, 'update-vip-required', {
+    roomName: context.roomName,
+    vipRequired: true
+  });
 
   const blockedSocket = io({ autoConnect: false });
   await connectSocket(blockedSocket);
   const joinResp = await emitWithAck(blockedSocket, 'join-room', {
     room: context.roomName,
-    name: 'NoVipViewer',
+    name: 'BlockedViewer',
     isViewer: true
   });
   blockedSocket.disconnect();
   if (joinResp?.ok) throw new Error('Private room allowed non-VIP viewer');
-  return 'Private room blocked non-VIP viewer.';
+  return 'Private room blocked non-VIP viewer with VIP required.';
 }
 
 async function testVipViewerJoinAndUsage() {
@@ -416,43 +450,101 @@ async function testVipViewerJoinAndUsage() {
   return 'VIP viewer joined and usage decremented.';
 }
 
-async function testRoomPaymentsConfig() {
+async function testVipRevoke() {
   if (!context.hostSocket) throw new Error('Host socket not initialized');
-  const updateResp = await emitWithAck(context.hostSocket, 'update-room-payments', {
+  const codeResp = await emitWithAck(context.hostSocket, 'generate-vip-code', {
+    room: context.roomName,
+    maxUses: 2
+  });
+  if (!codeResp?.ok || !codeResp?.code) throw new Error('VIP code generation failed');
+
+  const vipSocket = io({ autoConnect: false });
+  await connectSocket(vipSocket);
+  const joinResp = await emitWithAck(vipSocket, 'join-room', {
+    room: context.roomName,
+    name: 'VipViewerOnce',
+    isViewer: true,
+    vipCode: codeResp.code
+  });
+  vipSocket.disconnect();
+  if (!joinResp?.ok) throw new Error('VIP viewer could not join with code');
+
+  const revokeResp = await emitWithAck(context.hostSocket, 'revoke-vip-code', {
     roomName: context.roomName,
-    paymentEnabled: true,
-    paymentLabel: 'Tip the host',
-    paymentUrl: 'https://example.com/payments'
+    code: codeResp.code
   });
-  if (!updateResp?.ok) {
-    throw new Error(updateResp?.error || 'Unable to update room payments');
-  }
+  if (!revokeResp?.ok) throw new Error('VIP code revoke failed');
 
-  const viewerSocket = context.viewerSocket || io({ autoConnect: false });
-  if (!viewerSocket.connected) {
-    await connectSocket(viewerSocket);
-  }
-
-  const configResp = await emitWithAck(viewerSocket, 'get-room-config', {
-    roomName: context.roomName
+  const blockedSocket = io({ autoConnect: false });
+  await connectSocket(blockedSocket);
+  const blockedResp = await emitWithAck(blockedSocket, 'join-room', {
+    room: context.roomName,
+    name: 'VipViewerRevoked',
+    isViewer: true,
+    vipCode: codeResp.code
   });
-  if (!configResp?.ok) throw new Error(configResp?.error || 'Unable to fetch room config');
-  if (!configResp.paymentEnabled) throw new Error('Payment enabled flag missing');
-  if (configResp.paymentLabel !== 'Tip the host') throw new Error('Payment label mismatch');
-  if (configResp.paymentUrl !== 'https://example.com/payments') {
-    throw new Error('Payment URL mismatch');
+  blockedSocket.disconnect();
+  if (blockedResp?.ok) throw new Error('Revoked VIP code still allowed access');
+  return 'Revoked VIP code no longer grants access.';
+}
+
+async function testOverlayFieldDetection() {
+  await ensureStudioFrameLoaded();
+  const frameWindow = studioFrame.contentWindow;
+  if (!frameWindow) throw new Error('Studio iframe not ready');
+
+  const hook = frameWindow.__overlayTest;
+  if (!hook) throw new Error('Overlay test hook missing');
+
+  const overlayHtml = `
+    <div id="ticker">Live now</div>
+    <img id="logo" src="data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR4nGNgYAAAAAMAASsJTYQAAAAASUVORK5CYII=" />
+  `;
+
+  const initialRender = hook.getRenderCount();
+  hook.loadHTML(overlayHtml);
+
+  await new Promise((resolve) => setTimeout(resolve, 300));
+  const fields = hook.getFields();
+  const names = fields.map((field) => field.name);
+  if (!names.includes('ticker') || !names.includes('logo')) {
+    throw new Error(`Overlay fields missing: ${names.join(', ') || 'none'}`);
   }
 
-  return 'Room payment settings saved and readable by viewer.';
+  const overlayFieldsContainer = frameWindow.document.getElementById('overlayFields');
+  const labels = Array.from(overlayFieldsContainer?.querySelectorAll('label') || []).map(
+    (label) => label.textContent
+  );
+  if (!labels.includes('ticker') || !labels.includes('logo')) {
+    throw new Error('Overlay sidebar controls were not created for ticker/logo');
+  }
+
+  hook.updateField('ticker', 'Breaking News');
+  hook.updateField(
+    'logo',
+    'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR4nGP4DwQACfsD/VPv9x4AAAAASUVORK5CYII='
+  );
+  await new Promise((resolve) => setTimeout(resolve, 300));
+
+  const updatedTicker = hook.getFieldValue('ticker');
+  const updatedLogo = hook.getFieldValue('logo');
+  if (updatedTicker !== 'Breaking News') {
+    throw new Error('Overlay text field did not update backing DOM');
+  }
+  if (!updatedLogo || !updatedLogo.includes('data:image/png')) {
+    throw new Error('Overlay image field did not update backing DOM');
+  }
+
+  const updatedRender = hook.getRenderCount();
+  if (updatedRender <= initialRender) {
+    throw new Error('Overlay render did not re-run after updates');
+  }
+
+  return 'Overlay fields detected, editable, and re-rendered.';
 }
 
 async function testStudioButtonsWired() {
-  if (!studioFrame) throw new Error('Studio iframe missing');
-
-  studioFrame.src = '/index.html?selftest=1';
-  await new Promise((resolve) => {
-    studioFrame.onload = resolve;
-  });
+  await ensureStudioFrameLoaded();
   const ids = [
     'joinBtn',
     'startStreamBtn',
@@ -646,16 +738,24 @@ async function run() {
       run: testPublicViewerJoinAndBroadcast
     },
     {
-      name: 'Room payments can be configured and read by viewers',
-      run: testRoomPaymentsConfig
+      name: 'Private room allows viewers when VIP is off',
+      run: testPrivateViewerBlocked
     },
     {
-      name: 'Private viewers cannot join without VIP',
-      run: testPrivateViewerBlocked
+      name: 'Private room blocks viewers when VIP is required',
+      run: testPrivateVipRequiredBlocked
     },
     {
       name: 'VIP viewers can join with code and decrements usage',
       run: testVipViewerJoinAndUsage
+    },
+    {
+      name: 'VIP codes can be revoked and stop granting access',
+      run: testVipRevoke
+    },
+    {
+      name: 'Overlay fields detect IDs and re-render on edit',
+      run: testOverlayFieldDetection
     },
     {
       name: 'Studio buttons are wired',

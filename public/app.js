@@ -117,11 +117,15 @@ const state = {
   overlayActive: false,
   overlayImage: new Image(),
   currentRawHTML: '',
+  overlayFields: [],
+  overlayFieldValues: {},
+  overlayObjectUrls: {},
+  overlayContainer: null,
+  overlayVideoElements: [],
+  overlayRenderCount: 0,
   vipUsers: [],
   vipCodes: [],
-  paymentEnabled: false,
-  paymentLabel: '',
-  paymentUrl: ''
+  vipRequired: true
 };
 
 const viewerPeers = {};
@@ -190,8 +194,10 @@ const dom = {
   arcadeStatus: $('arcadeStatus'),
   htmlOverlayInput: $('htmlOverlayInput'),
   overlayStatus: $('overlayStatus'),
+  overlayFields: $('overlayFields'),
   userList: $('userList'),
-  openStreamBtn: $('openStreamBtn')
+  openStreamBtn: $('openStreamBtn'),
+  vipRequiredToggle: $('vipRequiredToggle')
 };
 
 function applyRoomQueryDefaults() {
@@ -340,6 +346,7 @@ function drawMixer(timestamp) {
 
   if (state.overlayActive && state.overlayImage.complete) {
     ctx.drawImage(state.overlayImage, 0, 0, canvas.width, canvas.height);
+    drawOverlayVideos(ctx);
   }
 }
 
@@ -478,6 +485,218 @@ function buildChatHTMLFromLogs(maxLines = 12) {
     .join('');
 }
 
+const TEXT_LIKE_TAGS = new Set([
+  'div',
+  'span',
+  'p',
+  'h1',
+  'h2',
+  'h3',
+  'h4',
+  'h5',
+  'h6',
+  'small',
+  'strong',
+  'em',
+  'b',
+  'i',
+  'label'
+]);
+
+function getOverlayFieldName(el) {
+  if (!el || !el.getAttribute) return '';
+  const dataName = el.getAttribute('data-overlay-field');
+  if (dataName && dataName.trim()) return dataName.trim();
+  const id = el.getAttribute('id');
+  if (id && id.trim()) return id.trim();
+  return '';
+}
+
+function getOverlayFieldType(el) {
+  const tag = el.tagName.toLowerCase();
+  if (tag === 'img') return 'image';
+  if (tag === 'video') return 'video';
+  if (tag === 'source' && el.parentElement?.tagName?.toLowerCase() === 'video') {
+    return 'video';
+  }
+  if (TEXT_LIKE_TAGS.has(tag)) return 'text';
+  return 'text';
+}
+
+function ensureOverlayContainer() {
+  if (state.overlayContainer) return state.overlayContainer;
+  const container = document.createElement('div');
+  container.id = 'overlaySandbox';
+  container.style.cssText =
+    'position:fixed; left:-9999px; top:-9999px; width:1920px; height:1080px; opacity:0; pointer-events:none;';
+  document.body.appendChild(container);
+  state.overlayContainer = container;
+  return container;
+}
+
+function resolveOverlaySelector(el, fieldName) {
+  if (el.hasAttribute && el.hasAttribute('data-overlay-field')) {
+    return `[data-overlay-field="${CSS.escape(fieldName)}"]`;
+  }
+  return `#${CSS.escape(fieldName)}`;
+}
+
+function buildOverlayFieldsFromHTML(htmlString) {
+  const parser = new DOMParser();
+  const doc = parser.parseFromString(htmlString, 'text/html');
+  const fields = [];
+  const used = new Set();
+
+  doc.querySelectorAll('*').forEach((el) => {
+    const name = getOverlayFieldName(el);
+    if (!name || used.has(name)) return;
+    used.add(name);
+    const type = getOverlayFieldType(el);
+    const selector = resolveOverlaySelector(el, name);
+    const initialValue =
+      type === 'text'
+        ? (el.textContent || '').trim()
+        : (el.getAttribute('src') || '').trim();
+    fields.push({ name, type, selector, initialValue });
+  });
+
+  state.overlayFields = fields;
+  state.overlayFieldValues = {};
+  fields.forEach((field) => {
+    state.overlayFieldValues[field.name] = field.initialValue;
+  });
+  renderOverlayFieldControls();
+}
+
+function findOverlayElement(field) {
+  const container = ensureOverlayContainer();
+  if (!field?.selector) return null;
+  return container.querySelector(field.selector);
+}
+
+function prepareOverlayVideo(videoEl) {
+  if (!videoEl) return;
+  videoEl.muted = true;
+  videoEl.loop = true;
+  videoEl.playsInline = true;
+  videoEl.autoplay = true;
+  videoEl.controls = false;
+  const playPromise = videoEl.play();
+  if (playPromise && typeof playPromise.catch === 'function') {
+    playPromise.catch(() => {});
+  }
+}
+
+function applyOverlayFieldValues(container) {
+  state.overlayFields.forEach((field) => {
+    const el = container.querySelector(field.selector);
+    if (!el) return;
+    const value = state.overlayFieldValues[field.name] ?? '';
+
+    if (field.type === 'text') {
+      el.textContent = value;
+      return;
+    }
+
+    if (field.type === 'image') {
+      el.setAttribute('src', value);
+      return;
+    }
+
+    if (field.type === 'video') {
+      if (el.tagName.toLowerCase() === 'source') {
+        el.setAttribute('src', value);
+        const video = el.parentElement;
+        if (video && video.tagName.toLowerCase() === 'video') {
+          video.load();
+          prepareOverlayVideo(video);
+        }
+      } else {
+        el.setAttribute('src', value);
+        el.load?.();
+        prepareOverlayVideo(el);
+      }
+    }
+  });
+}
+
+function drawOverlayVideos(ctx) {
+  if (!state.overlayContainer || !state.overlayVideoElements.length) return;
+  const containerRect = state.overlayContainer.getBoundingClientRect();
+  if (!containerRect.width || !containerRect.height) return;
+
+  const scaleX = canvas.width / containerRect.width;
+  const scaleY = canvas.height / containerRect.height;
+
+  state.overlayVideoElements.forEach((video) => {
+    if (!video || video.readyState < 2) return;
+    const rect = video.getBoundingClientRect();
+    const x = (rect.left - containerRect.left) * scaleX;
+    const y = (rect.top - containerRect.top) * scaleY;
+    const w = rect.width * scaleX;
+    const h = rect.height * scaleY;
+    if (w > 0 && h > 0) {
+      ctx.drawImage(video, x, y, w, h);
+    }
+  });
+}
+
+function updateOverlayFieldValue(name, value) {
+  if (!name) return;
+  state.overlayFieldValues[name] = value;
+  if (state.overlayActive && state.currentRawHTML) {
+    renderHTMLLayout(state.currentRawHTML);
+  }
+}
+
+function renderOverlayFieldControls() {
+  if (!dom.overlayFields) return;
+  dom.overlayFields.innerHTML = '';
+  if (!state.overlayFields.length) return;
+
+  state.overlayFields.forEach((field) => {
+    const row = document.createElement('div');
+    row.className = 'overlay-field';
+
+    const label = document.createElement('label');
+    label.textContent = field.name;
+    row.appendChild(label);
+
+    const value = state.overlayFieldValues[field.name] ?? '';
+
+    if (field.type === 'text') {
+      const isLong = value.length > 60 || value.includes('\n');
+      const input = document.createElement(isLong ? 'textarea' : 'input');
+      input.value = value;
+      input.oninput = () => updateOverlayFieldValue(field.name, input.value);
+      row.appendChild(input);
+    } else if (field.type === 'image' || field.type === 'video') {
+      const urlInput = document.createElement('input');
+      urlInput.type = 'text';
+      urlInput.placeholder = field.type === 'image' ? 'Image URL' : 'Video URL';
+      urlInput.value = value;
+      urlInput.onchange = () => updateOverlayFieldValue(field.name, urlInput.value.trim());
+      row.appendChild(urlInput);
+
+      const fileInput = document.createElement('input');
+      fileInput.type = 'file';
+      fileInput.accept = field.type === 'image' ? 'image/*' : 'video/*';
+      fileInput.onchange = () => {
+        const file = fileInput.files?.[0];
+        if (!file) return;
+        const previousUrl = state.overlayObjectUrls[field.name];
+        if (previousUrl) URL.revokeObjectURL(previousUrl);
+        const objectUrl = URL.createObjectURL(file);
+        state.overlayObjectUrls[field.name] = objectUrl;
+        updateOverlayFieldValue(field.name, objectUrl);
+      };
+      row.appendChild(fileInput);
+    }
+
+    dom.overlayFields.appendChild(row);
+  });
+}
+
 function renderHTMLLayout(htmlString) {
   if (!htmlString) return;
   state.currentRawHTML = htmlString;
@@ -494,11 +713,21 @@ function renderHTMLLayout(htmlString) {
     .replace(/{{title}}/g, streamTitle)
     .replace(/{{chat}}/g, chatHTML);
 
+  const container = ensureOverlayContainer();
+  container.innerHTML = `
+    <div class="layout-${state.mixerLayout}" style="width:100%; height:100%; margin:0; padding:0;">
+      ${processedHTML}
+    </div>
+  `;
+  applyOverlayFieldValues(container);
+  state.overlayVideoElements = Array.from(container.querySelectorAll('video'));
+  state.overlayVideoElements.forEach((video) => prepareOverlayVideo(video));
+
   const svg = `
         <svg xmlns="http://www.w3.org/2000/svg" width="1920" height="1080">
             <foreignObject width="100%" height="100%">
-                <div xmlns="http://www.w3.org/1999/xhtml" class="layout-${state.mixerLayout}" style="width:100%; height:100%; margin:0; padding:0;">
-                    ${processedHTML}
+                <div xmlns="http://www.w3.org/1999/xhtml" style="width:100%; height:100%; margin:0; padding:0;">
+                    ${container.innerHTML}
                 </div>
             </foreignObject>
         </svg>`;
@@ -507,6 +736,10 @@ function renderHTMLLayout(htmlString) {
     state.overlayImage.src =
       'data:image/svg+xml;base64,' + btoa(unescape(encodeURIComponent(svg)));
     state.overlayActive = true;
+    state.overlayRenderCount += 1;
+    if (window.__overlayTestHooks?.onRender) {
+      window.__overlayTestHooks.onRender(state.overlayRenderCount);
+    }
   } catch (e) {
     console.error('[Overlay] Failed to encode SVG', e);
   }
@@ -1219,19 +1452,6 @@ function emitWithAck(eventName, payload) {
   });
 }
 
-function applyPrivacyState(privacy) {
-  state.isPrivateMode = privacy === 'private';
-  if (dom.togglePrivateBtn) {
-    dom.togglePrivateBtn.textContent = state.isPrivateMode ? 'ON' : 'OFF';
-    dom.togglePrivateBtn.className = state.isPrivateMode
-      ? 'btn small danger'
-      : 'btn small secondary';
-  }
-  if (dom.guestListPanel) {
-    dom.guestListPanel.style.display = state.isPrivateMode ? 'block' : 'none';
-  }
-}
-
 async function ensureHostRoom(roomName) {
   const info = await emitWithAck('get-room-info', { roomName });
   if (!info?.exists) {
@@ -1295,7 +1515,10 @@ async function joinRoomAsHost(room) {
       renderVipUsers();
       renderVipCodes();
       if (resp?.privacy) {
-        applyPrivacyState(resp.privacy);
+        applyPrivacyState(resp.privacy === 'private', { emitUpdate: false });
+      }
+      if (typeof resp?.vipRequired === 'boolean') {
+        applyVipRequiredState(resp.vipRequired, { emitUpdate: false });
       }
       socket.emit('get-vip-codes', { roomName: room }, (codesResp) => {
         if (codesResp?.ok) {
@@ -1390,7 +1613,7 @@ socket.on('user-left', ({ id }) => {
   endPeerCall(id, true);
 });
 
-socket.on('room-update', ({ locked, streamTitle, ownerId, users }) => {
+socket.on('room-update', ({ locked, streamTitle, ownerId, users, vipRequired, privacy }) => {
   state.latestUserList = users || [];
   state.currentOwnerId = ownerId;
 
@@ -1410,6 +1633,13 @@ socket.on('room-update', ({ locked, streamTitle, ownerId, users }) => {
   }
 
   renderUserList();
+
+  if (typeof privacy === 'string') {
+    applyPrivacyState(privacy === 'private', { emitUpdate: false });
+  }
+  if (typeof vipRequired === 'boolean') {
+    applyVipRequiredState(vipRequired, { emitUpdate: false });
+  }
 
   if (state.overlayActive) {
     renderHTMLLayout(state.currentRawHTML);
@@ -1517,6 +1747,22 @@ function applyPrivacyState(isPrivate, { emitUpdate = true } = {}) {
   }
 }
 
+function applyVipRequiredState(isRequired, { emitUpdate = true } = {}) {
+  state.vipRequired = !!isRequired;
+  if (dom.vipRequiredToggle) {
+    dom.vipRequiredToggle.textContent = state.vipRequired ? 'ON' : 'OFF';
+    dom.vipRequiredToggle.className = state.vipRequired
+      ? 'btn small danger'
+      : 'btn small secondary';
+  }
+  if (emitUpdate && state.currentRoom) {
+    socket.emit('update-vip-required', {
+      roomName: state.currentRoom,
+      vipRequired: state.vipRequired
+    });
+  }
+}
+
 if (dom.addGuestBtn) {
   dom.addGuestBtn.onclick = () => {
     if (!dom.guestNameInput) return;
@@ -1598,18 +1844,39 @@ function renderVipCodes() {
   if (!dom.vipCodeList) return;
   dom.vipCodeList.innerHTML = '';
   state.vipCodes.forEach((entry) => {
-    const tag = document.createElement('span');
-    tag.style.cssText =
-      'background:var(--accent); color:#000; padding:2px 6px; border-radius:4px; font-size:0.7rem;';
+    const row = document.createElement('div');
+    row.style.cssText =
+      'display:flex; align-items:center; justify-content:space-between; gap:6px; background:rgba(255,255,255,0.06); padding:4px 6px; border-radius:6px; font-size:0.7rem;';
+
+    const label = document.createElement('span');
     if (typeof entry === 'string') {
-      tag.textContent = entry;
+      label.textContent = entry;
     } else {
       const remaining = Number.isFinite(entry.usesLeft)
         ? entry.usesLeft
         : Math.max(0, (entry.maxUses || 0) - (entry.used || 0));
-      tag.textContent = `${entry.code} (${remaining}/${entry.maxUses})`;
+      label.textContent = `${entry.code} (${remaining}/${entry.maxUses})`;
     }
-    dom.vipCodeList.appendChild(tag);
+
+    const revokeBtn = document.createElement('button');
+    revokeBtn.className = 'btn small danger';
+    revokeBtn.textContent = 'Revoke';
+    revokeBtn.onclick = () => {
+      if (!state.currentRoom || !entry?.code) return;
+      socket.emit('revoke-vip-code', { roomName: state.currentRoom, code: entry.code }, (resp) => {
+        if (!resp?.ok) {
+          setVipStatus(resp?.error || 'Unable to revoke VIP code.', 'error');
+        } else {
+          setVipStatus('VIP code revoked.');
+        }
+      });
+    };
+
+    row.appendChild(label);
+    if (entry?.code) {
+      row.appendChild(revokeBtn);
+    }
+    dom.vipCodeList.appendChild(row);
   });
 }
 
@@ -1653,42 +1920,9 @@ if (dom.generateVipCodeBtn) {
   };
 }
 
-if (dom.paymentSaveBtn) {
-  dom.paymentSaveBtn.onclick = () => {
-    if (!state.currentRoom) return;
-    if (!state.iAmHost) return;
-
-    const enabled = !!dom.paymentEnableToggle?.checked;
-    const label = dom.paymentLabelInput ? dom.paymentLabelInput.value.trim() : '';
-    const url = dom.paymentUrlInput ? dom.paymentUrlInput.value.trim() : '';
-
-    if (enabled && !label) {
-      setPaymentStatus('Button label is required when payments are enabled.', 'error');
-      return;
-    }
-
-    if (enabled && (!url || !isValidPaymentUrl(url))) {
-      setPaymentStatus('Payment URL must start with http:// or https://.', 'error');
-      return;
-    }
-
-    socket.emit(
-      'update-room-payments',
-      {
-        roomName: state.currentRoom,
-        paymentEnabled: enabled,
-        paymentLabel: label,
-        paymentUrl: url
-      },
-      (resp) => {
-        if (resp?.ok) {
-          applyPaymentConfig({ paymentEnabled: enabled, paymentLabel: label, paymentUrl: url });
-          setPaymentStatus('Payment settings saved.');
-        } else {
-          setPaymentStatus(resp?.error || 'Unable to save payment settings.', 'error');
-        }
-      }
-    );
+if (dom.vipRequiredToggle) {
+  dom.vipRequiredToggle.onclick = () => {
+    applyVipRequiredState(!state.vipRequired);
   };
 }
 
@@ -1893,7 +2127,9 @@ if (dom.htmlOverlayInput) {
 
     const r = new FileReader();
     r.onload = (ev) => {
-      renderHTMLLayout(ev.target.result);
+      const htmlString = ev.target.result;
+      buildOverlayFieldsFromHTML(htmlString);
+      renderHTMLLayout(htmlString);
       if (dom.overlayStatus) dom.overlayStatus.textContent = '[Loaded]';
     };
     r.readAsText(f);
@@ -1903,7 +2139,38 @@ if (dom.htmlOverlayInput) {
 window.clearOverlay = () => {
   state.overlayActive = false;
   state.overlayImage = new Image();
+  state.currentRawHTML = '';
+  state.overlayFields = [];
+  state.overlayFieldValues = {};
+  state.overlayVideoElements = [];
+  Object.values(state.overlayObjectUrls).forEach((url) => URL.revokeObjectURL(url));
+  state.overlayObjectUrls = {};
+  if (dom.overlayFields) dom.overlayFields.innerHTML = '';
   if (dom.overlayStatus) dom.overlayStatus.textContent = '[Empty]';
+};
+
+window.__overlayTest = {
+  loadHTML(htmlString) {
+    buildOverlayFieldsFromHTML(htmlString);
+    renderHTMLLayout(htmlString);
+  },
+  getFields() {
+    return state.overlayFields.map((field) => ({ name: field.name, type: field.type }));
+  },
+  updateField(name, value) {
+    updateOverlayFieldValue(name, value);
+  },
+  getFieldValue(name) {
+    const field = state.overlayFields.find((item) => item.name === name);
+    if (!field) return null;
+    const el = findOverlayElement(field);
+    if (!el) return null;
+    if (field.type === 'text') return el.textContent || '';
+    return el.getAttribute('src') || '';
+  },
+  getRenderCount() {
+    return state.overlayRenderCount;
+  }
 };
 
 // ======================================================
