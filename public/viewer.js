@@ -35,7 +35,7 @@ const state = {
   statsInterval: null,
   joined: false,
   roomPrivacy: 'public',
-  vipRequired: true,
+  vipRequired: false,
   turnConfig: {
     enabled: false,
     host: '',
@@ -477,6 +477,17 @@ function appendChat(name, text) {
   log.scrollTop = log.scrollHeight;
 }
 
+function getFriendlyVipMessage(error, hasCode) {
+  const normalizedError = (error || '').toLowerCase();
+  if (normalizedError.includes('invalid') || normalizedError.includes('exhausted')) {
+    return 'That VIP code didn’t work. Please check with the host for a fresh code.';
+  }
+  if (!hasCode || normalizedError.includes('required')) {
+    return 'This room is VIP-only right now. Ask the host for a VIP code to join.';
+  }
+  return 'This room is VIP-only right now. Ask the host for a VIP code to join.';
+}
+
 socket.on('public-chat', (d) => {
   appendChat(d.name, d.text);
 });
@@ -627,7 +638,15 @@ window.addEventListener('load', () => {
           if (joinStatus) joinStatus.textContent = '';
           fetchRoomConfig(state.currentRoom);
         } else {
-          if (joinStatus) joinStatus.textContent = resp?.error || 'Unable to join room.';
+          if (joinStatus) {
+            const errorText = resp?.error || '';
+            const hasVipCode = !!codeValue;
+            const vipMessage =
+              state.roomPrivacy === 'private' && state.vipRequired
+                ? getFriendlyVipMessage(errorText, hasVipCode)
+                : '';
+            joinStatus.textContent = vipMessage || errorText || 'Unable to join room.';
+          }
         }
       }
     );
@@ -651,7 +670,7 @@ window.addEventListener('load', () => {
 
     const code = vipInput?.value.trim();
     if (state.roomPrivacy === 'private' && state.vipRequired && !code) {
-      if (joinStatus) joinStatus.textContent = 'VIP code required for this room.';
+      if (joinStatus) joinStatus.textContent = getFriendlyVipMessage('', false);
       return;
     }
 
