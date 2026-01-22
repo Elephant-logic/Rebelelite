@@ -241,6 +241,14 @@ function listVipCodes(record) {
   }));
 }
 
+function emitVipCodesUpdate(roomName) {
+  const info = rooms[roomName];
+  if (!info || !info.ownerId) return;
+  const record = getStoredRoom(roomName);
+  if (!record) return;
+  io.to(info.ownerId).emit('vip-codes-updated', listVipCodes(record));
+}
+
 function isRoomClaimed(roomName) {
   const record = getStoredRoom(roomName);
   return !!(record && (record.ownerId || record.password));
@@ -458,6 +466,7 @@ io.on('connection', (socket) => {
       reply({ ok: false, error: result.error });
       return;
     }
+    emitVipCodesUpdate(roomName);
     reply({ ok: true, code, maxUses: normalizedMaxUses });
   });
 
@@ -517,6 +526,7 @@ io.on('connection', (socket) => {
       reply({ ok: false, reason: 'invalid or exhausted' });
       return;
     }
+    emitVipCodesUpdate(targetRoom.name);
     if (!socket.data.vipRooms) socket.data.vipRooms = new Set();
     socket.data.vipRooms.add(targetRoom.name);
     const vipToken = issueVipToken(targetRoom.name);
@@ -609,6 +619,7 @@ io.on('connection', (socket) => {
         });
         if (result.ok && !exhausted) {
           vipByCode = true;
+          emitVipCodesUpdate(roomName);
         }
       }
     }
