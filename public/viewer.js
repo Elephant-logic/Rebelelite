@@ -21,9 +21,10 @@
 const $ = id => document.getElementById(id);
 const socket = io({ autoConnect: false });
 
-function getRtcConfig() {
-  return { iceServers: getIceServers(state.turnConfig) };
-}
+// ICE config (uses ICE_SERVERS from ice.js if present, else Google STUN)
+const iceConfig = (typeof ICE_SERVERS !== 'undefined' && Array.isArray(ICE_SERVERS) && ICE_SERVERS.length)
+  ? { iceServers: ICE_SERVERS }
+  : { iceServers: [{ urls: 'stun:stun.l.google.com:19302' }] };
 
 const state = {
   pc: null,
@@ -33,65 +34,8 @@ const state = {
   callPc: null,
   localCallStream: null,
   statsInterval: null,
-  joined: false,
-  roomPrivacy: 'public',
-  vipRequired: false,
-  turnConfig: {
-    enabled: false,
-    host: '',
-    port: '',
-    tlsPort: '',
-    username: '',
-    password: ''
-  }
+  joined: false
 };
-
-function logSelectedCandidate(label, report) {
-  if (!report) return;
-  const candidateType = report.candidateType || report.type;
-  const transport = report.protocol || report.transport;
-  if (!candidateType || !transport) return;
-  console.log(`[WebRTC] ${label} selected candidate: ${candidateType} (${transport})`);
-}
-
-function attachCandidateDiagnostics(pc, label) {
-  let logged = false;
-  const attemptLog = async () => {
-    if (logged) return;
-    if (!['connected', 'completed'].includes(pc.iceConnectionState)) return;
-    const stats = await pc.getStats();
-    let selectedPair = null;
-    stats.forEach((report) => {
-      if (report.type === 'candidate-pair' && report.selected) {
-        selectedPair = report;
-      }
-    });
-    if (!selectedPair) {
-      stats.forEach((report) => {
-        if (report.type === 'transport' && report.selectedCandidatePairId) {
-          stats.forEach((pair) => {
-            if (pair.id === report.selectedCandidatePairId) {
-              selectedPair = pair;
-            }
-          });
-        }
-      });
-    }
-    if (!selectedPair) return;
-    let localCandidate = null;
-    stats.forEach((report) => {
-      if (report.id === selectedPair.localCandidateId) {
-        localCandidate = report;
-      }
-    });
-    if (localCandidate) {
-      logSelectedCandidate(label, localCandidate);
-      logged = true;
-    }
-  };
-  pc.addEventListener('iceconnectionstatechange', attemptLog);
-  pc.addEventListener('connectionstatechange', attemptLog);
-}
 
 // ======================================================
 // REAL-TIME HEALTH REPORTING (Professional Patch)
@@ -229,8 +173,7 @@ function attachViewerStream(stream) {
  * Signaling direction: [VIEWER] -> (webrtc-answer) -> [SERVER] -> [HOST]
  */
 function createBroadcastPeerConnection() {
-    const nextPc = new RTCPeerConnection(getRtcConfig());
-    attachCandidateDiagnostics(nextPc, 'Broadcast');
+    const nextPc = new RTCPeerConnection(iceConfig);
     setupReceiver(nextPc);
 
     nextPc.ontrack = (e) => {
@@ -238,9 +181,9 @@ function createBroadcastPeerConnection() {
     };
 
     nextPc.onicecandidate = (e) => {
-        if (e.candidate && state.hostId) {
+        if (e.candidate && hostId) {
             socket.emit("webrtc-ice-candidate", {
-                targetId: state.hostId,
+                targetId: hostId,
                 candidate: e.candidate
             });
         }
@@ -255,29 +198,30 @@ function createBroadcastPeerConnection() {
  */
 async function handleBroadcastOffer({ sdp, from }) {
     try {
-        state.hostId = from;
+        hostId = from;
 
-        if (state.pc) {
-            try {
-                state.pc.close();
-            } catch (e) {}
-            state.pc = null;
-        }
+    if (state.pc) {
+      try {
+        state.pc.close();
+      } catch (e) {}
+      state.pc = null;
+    }
 
-        await fetchRoomConfig(state.currentRoom);
-        state.pc = createBroadcastPeerConnection();
+        pc = createBroadcastPeerConnection();
 
-        await state.pc.setRemoteDescription(new RTCSessionDescription(sdp));
-        const answer = await state.pc.createAnswer();
-        await state.pc.setLocalDescription(answer);
+        await pc.setRemoteDescription(new RTCSessionDescription(sdp));
+        const answer = await pc.createAnswer();
+        await pc.setLocalDescription(answer);
 
         socket.emit("webrtc-answer", {
-            targetId: state.hostId,
+            targetId: hostId,
             sdp: answer
         });
+      }
+    };
 
         // NEW: Initiate stats polling
-        startStatsReporting(state.pc);
+        startStatsReporting(pc);
     } catch (err) {
         console.error("[Viewer] webrtc-offer failed", err);
     }
@@ -288,9 +232,9 @@ async function handleBroadcastOffer({ sdp, from }) {
  * Called when the server relays webrtc-ice-candidate.
  */
 async function handleBroadcastIceCandidate({ candidate }) {
-    if (!state.pc || !candidate) return;
+    if (!pc || !candidate) return;
     try {
-        await state.pc.addIceCandidate(new RTCIceCandidate(candidate));
+        await pc.addIceCandidate(new RTCIceCandidate(candidate));
     } catch (err) {
         console.error("[Viewer] addIceCandidate failed", err);
     }
@@ -363,14 +307,13 @@ socket.on("ring-alert", handleRingAlert);
  * Signaling direction: [VIEWER] -> (call-offer) -> [SERVER] -> [HOST]
  */
 function createCallPeerConnection() {
-    const pc2 = new RTCPeerConnection(getRtcConfig());
-    attachCandidateDiagnostics(pc2, 'Call');
-    state.callPc = pc2;
+    const pc2 = new RTCPeerConnection(iceConfig);
+    callPc = pc2;
 
     pc2.onicecandidate = (e) => {
         if (e.candidate) {
             socket.emit("call-ice", {
-                targetId: state.hostId,
+                targetId: hostId,
                 candidate: e.candidate
             });
         }
@@ -380,7 +323,7 @@ function createCallPeerConnection() {
     console.log('[Viewer] host call track', e.streams[0]);
   };
 
-    state.localCallStream.getTracks().forEach((t) => pc2.addTrack(t, state.localCallStream));
+    localCallStream.getTracks().forEach(t => pc2.addTrack(t, localCallStream));
     return pc2;
 }
 
@@ -393,21 +336,19 @@ async function startCallToHost(targetId) {
 
     await ensureLocalCallStream();
 
-    if (state.callPc) {
-        try {
-            state.callPc.close();
-        } catch (e) {}
-        state.callPc = null;
+    if (callPc) {
+        try { callPc.close(); } catch (e) {}
+        callPc = null;
     }
 
-    state.hostId = targetId;
+    hostId = targetId;
     const pc2 = createCallPeerConnection();
 
   const offer = await pc2.createOffer();
   await pc2.setLocalDescription(offer);
 
     socket.emit("call-offer", {
-        targetId: state.hostId,
+        targetId: hostId,
         offer
     });
 }
@@ -417,9 +358,9 @@ async function startCallToHost(targetId) {
  * Called when the server relays call-answer.
  */
 async function handleCallAnswer({ from, answer }) {
-    if (!state.callPc || !answer) return;
+    if (!callPc || !answer) return;
     try {
-        await state.callPc.setRemoteDescription(new RTCSessionDescription(answer));
+        await callPc.setRemoteDescription(new RTCSessionDescription(answer));
     } catch (err) {
         console.error("[Viewer] remote answer failed", err);
     }
@@ -430,9 +371,9 @@ async function handleCallAnswer({ from, answer }) {
  * Signaling direction: [HOST] -> (call-ice) -> [SERVER] -> [VIEWER]
  */
 async function handleCallIce({ from, candidate }) {
-    if (!state.callPc || !candidate) return;
+    if (!callPc || !candidate) return;
     try {
-        await state.callPc.addIceCandidate(new RTCIceCandidate(candidate));
+        await callPc.addIceCandidate(new RTCIceCandidate(candidate));
     } catch (err) {
         console.error("[Viewer] call ICE failed", err);
     }
@@ -443,11 +384,9 @@ async function handleCallIce({ from, candidate }) {
  * Signaling direction: [HOST] -> (call-end) -> [SERVER] -> [VIEWER]
  */
 function handleCallEnd({ from }) {
-    if (state.callPc) {
-        try {
-            state.callPc.close();
-        } catch (e) {}
-        state.callPc = null;
+    if (callPc) {
+        try { callPc.close(); } catch (e) {}
+        callPc = null;
     }
 }
 
@@ -477,20 +416,6 @@ function appendChat(name, text) {
   log.scrollTop = log.scrollHeight;
 }
 
-function getFriendlyVipMessage(error, hasCode) {
-  const normalizedError = (error || '').toLowerCase();
-  if (normalizedError.includes('username')) {
-    return 'This private room only allows VIP usernames. Ask the host to add your name.';
-  }
-  if (normalizedError.includes('invalid') || normalizedError.includes('exhausted')) {
-    return 'That VIP code didn’t work. Please check with the host for a fresh code.';
-  }
-  if (!hasCode || normalizedError.includes('required')) {
-    return 'This room is VIP-only right now. Ask the host for a VIP code to join.';
-  }
-  return 'This room is VIP-only right now. Ask the host for a VIP code to join.';
-}
-
 socket.on('public-chat', (d) => {
   appendChat(d.name, d.text);
 });
@@ -515,8 +440,7 @@ socket.on('room-error', (err) => {
 // ======================================================
 function sendChat() {
   const input = $('chatInput');
-  if (!input || !state.currentRoom || !state.joined) return;
-  if (!socket.connected) socket.connect();
+  if (!input || !state.currentRoom) return;
 
   const text = input.value.trim();
   if (!text) return;
@@ -529,81 +453,6 @@ function sendChat() {
   });
 
   input.value = '';
-}
-
-function emitWithAck(eventName, payload) {
-  return new Promise((resolve) => {
-    socket.emit(eventName, payload, resolve);
-  });
-}
-
-async function hydrateRoomInfo(roomName) {
-  if (!socket.connected) socket.connect();
-  const info = await emitWithAck('get-room-info', { roomName });
-  if (info?.privacy) {
-    state.roomPrivacy = info.privacy;
-  }
-  if (typeof info?.vipRequired === 'boolean') {
-    state.vipRequired = info.vipRequired;
-  }
-  const vipLabel = $('viewerVipLabel');
-  const vipInput = $('viewerVipCodeInput');
-  if (vipLabel) {
-    const required = state.roomPrivacy === 'private' && state.vipRequired;
-    vipLabel.textContent = required
-      ? 'VIP Code (required for VIP-code rooms)'
-      : 'VIP Code (only needed if host enables VIP codes)';
-    if (vipInput) {
-      vipInput.disabled = !required;
-      if (!required) {
-        vipInput.value = '';
-        vipInput.placeholder = 'Not required';
-      } else {
-        vipInput.placeholder = 'e.g. 8XFA12';
-      }
-    }
-  }
-}
-
-function applyPaymentConfig(config) {
-  state.paymentEnabled = !!config.paymentEnabled;
-  state.paymentLabel = config.paymentLabel || '';
-  state.paymentUrl = config.paymentUrl || '';
-
-  const button = $('paymentBtn');
-  if (!button) return;
-
-  if (state.paymentEnabled && state.paymentUrl) {
-    button.textContent = state.paymentLabel || 'Tip the host';
-    button.style.display = 'inline-block';
-    button.onclick = () => {
-      window.open(state.paymentUrl, '_blank', 'noopener');
-    };
-  } else {
-    button.style.display = 'none';
-    button.onclick = null;
-  }
-}
-
-function applyTurnConfig(config) {
-  const turn = config?.turnConfig || config || {};
-  state.turnConfig = {
-    enabled: !!turn.enabled,
-    host: turn.host || '',
-    port: turn.port || '',
-    tlsPort: turn.tlsPort || '',
-    username: turn.username || '',
-    password: turn.password || ''
-  };
-}
-
-async function fetchRoomConfig(roomName) {
-  if (!socket.connected) socket.connect();
-  const config = await emitWithAck('get-room-config', { roomName });
-  if (config?.ok) {
-    applyPaymentConfig(config);
-    applyTurnConfig(config.turnConfig);
-  }
 }
 
 window.addEventListener('load', () => {
@@ -630,8 +479,6 @@ window.addEventListener('load', () => {
   const joinStatus = $('joinStatus');
   let activeVipToken = vipTokenParam ? vipTokenParam.trim() : '';
 
-  const roomInfoPromise = hydrateRoomInfo(room);
-
   const completeJoin = (vipToken) => {
     const codeValue = vipToken ? '' : vipInput?.value.trim();
     if (!socket.connected) socket.connect();
@@ -649,24 +496,14 @@ window.addEventListener('load', () => {
           state.joined = true;
           if (joinPanel) joinPanel.classList.add('hidden');
           if (joinStatus) joinStatus.textContent = '';
-          fetchRoomConfig(state.currentRoom);
         } else {
-          if (joinStatus) {
-            const errorText = resp?.error || '';
-            const hasVipCode = !!codeValue;
-            const vipMessage =
-              state.roomPrivacy === 'private'
-                ? getFriendlyVipMessage(errorText, hasVipCode)
-                : '';
-            joinStatus.textContent = vipMessage || errorText || 'Unable to join room.';
-          }
+          if (joinStatus) joinStatus.textContent = resp?.error || 'Unable to join room.';
         }
       }
     );
   };
 
-  const attemptJoin = async () => {
-    await roomInfoPromise;
+  const attemptJoin = () => {
     const chosenName = (nameInput?.value || state.myName || '').trim();
     if (!chosenName) {
       if (joinStatus) joinStatus.textContent = 'Please enter a display name.';
@@ -678,6 +515,21 @@ window.addEventListener('load', () => {
 
     if (activeVipToken) {
       completeJoin(activeVipToken);
+      return;
+    }
+
+    const code = vipInput?.value.trim();
+    if (code) {
+      if (!socket.connected) socket.connect();
+      socket.emit('redeem-vip-code', { code, desiredName: state.myName }, (resp) => {
+        if (resp?.ok && resp?.roomName) {
+          state.currentRoom = resp.roomName;
+          activeVipToken = resp.vipToken || '';
+          completeJoin(activeVipToken);
+        } else {
+          if (joinStatus) joinStatus.textContent = 'Invalid or expired VIP code.';
+        }
+      });
       return;
     }
 

@@ -79,58 +79,6 @@ textarea:focus { border-color: var(--accent); box-shadow: 0 0 0 2px rgba(74,243,
   font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
 }
 
-.overlay-map {
-  background: var(--panel-soft);
-  border: 1px solid var(--border);
-  border-radius: var(--radius-sm);
-  padding: 10px;
-  display: flex;
-  flex-direction: column;
-  gap: 10px;
-}
-
-.overlay-map-title {
-  font-size: 0.8rem;
-  font-weight: 600;
-  color: var(--text);
-}
-
-.overlay-map-desc {
-  margin: 0;
-  font-size: 0.7rem;
-  color: var(--muted);
-  line-height: 1.4;
-}
-
-.overlay-map-list {
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
-  max-height: 220px;
-  overflow-y: auto;
-}
-
-.overlay-map-row {
-  display: grid;
-  grid-template-columns: 1fr;
-  gap: 6px;
-  padding: 6px;
-  border: 1px solid var(--border);
-  border-radius: var(--radius-sm);
-  background: rgba(0, 0, 0, 0.15);
-}
-
-.overlay-map-target {
-  font-size: 0.7rem;
-  color: var(--muted);
-}
-
-.overlay-map-actions {
-  display: flex;
-  gap: 8px;
-  justify-content: flex-end;
-}
-
 /* Buttons */
 .btn {
   border: none; padding: 12px 18px; border-radius: var(--radius-sm); font-weight: 600;

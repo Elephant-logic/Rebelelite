@@ -91,10 +91,6 @@ console.log('Rebel Stream Host App Loaded');
 
 const socket = io({ autoConnect: false });
 const $ = (id) => document.getElementById(id);
-const isSelftestMode = new URLSearchParams(window.location.search).get('selftest') === '1';
-if (isSelftestMode) {
-  window.__selftestHostSocket = socket;
-}
 
 const state = {
   currentRoom: null,
@@ -102,10 +98,10 @@ const state = {
   myId: null,
   iAmHost: false,
   wasHost: false,
-  joined: false,
   latestUserList: [],
   currentOwnerId: null,
   isPrivateMode: false,
+  allowedGuests: [],
   mutedUsers: new Set(),
   localStream: null,
   screenStream: null,
@@ -120,81 +116,16 @@ const state = {
   overlayActive: false,
   overlayImage: new Image(),
   currentRawHTML: '',
-  overlayFields: [],
-  overlayFieldValues: {},
-  overlayObjectUrls: {},
-  overlayContainer: null,
-  overlayVideoElements: [],
-  overlayRenderCount: 0,
-  overlayMappingPending: false,
-  overlayMappingCandidates: [],
-  pendingOverlayHTML: '',
   vipUsers: [],
-  vipCodes: [],
-  vipRequired: false,
-  turnConfig: {
-    enabled: false,
-    host: '',
-    port: '',
-    tlsPort: '',
-    username: '',
-    password: ''
-  }
+  vipCodes: []
 };
 
 const viewerPeers = {};
 const callPeers = {};
 
-function getRtcConfig() {
-  return { iceServers: getIceServers(state.turnConfig) };
-}
-
-function logSelectedCandidate(label, report) {
-  if (!report) return;
-  const candidateType = report.candidateType || report.type;
-  const transport = report.protocol || report.transport;
-  if (!candidateType || !transport) return;
-  console.log(`[WebRTC] ${label} selected candidate: ${candidateType} (${transport})`);
-}
-
-function attachCandidateDiagnostics(pc, label) {
-  let logged = false;
-  const attemptLog = async () => {
-    if (logged) return;
-    if (!['connected', 'completed'].includes(pc.iceConnectionState)) return;
-    const stats = await pc.getStats();
-    let selectedPair = null;
-    stats.forEach((report) => {
-      if (report.type === 'candidate-pair' && report.selected) {
-        selectedPair = report;
-      }
-    });
-    if (!selectedPair) {
-      stats.forEach((report) => {
-        if (report.type === 'transport' && report.selectedCandidatePairId) {
-          stats.forEach((pair) => {
-            if (pair.id === report.selectedCandidatePairId) {
-              selectedPair = pair;
-            }
-          });
-        }
-      });
-    }
-    if (!selectedPair) return;
-    let localCandidate = null;
-    stats.forEach((report) => {
-      if (report.id === selectedPair.localCandidateId) {
-        localCandidate = report;
-      }
-    });
-    if (localCandidate) {
-      logSelectedCandidate(label, localCandidate);
-      logged = true;
-    }
-  };
-  pc.addEventListener('iceconnectionstatechange', attemptLog);
-  pc.addEventListener('connectionstatechange', attemptLog);
-}
+const iceConfig = (typeof ICE_SERVERS !== 'undefined' && ICE_SERVERS.length)
+  ? { iceServers: ICE_SERVERS }
+  : { iceServers: [{ urls: 'stun:stun.l.google.com:19302' }] };
 
 const dom = {
   previewModal: $('streamPreviewModal'),
@@ -223,8 +154,11 @@ const dom = {
   updateTitleBtn: $('updateTitleBtn'),
   updateSlugBtn: $('updateSlugBtn'),
   slugInput: $('slugInput'),
-  publicRoomToggle: $('publicRoomToggle'),
   togglePrivateBtn: $('togglePrivateBtn'),
+  addGuestBtn: $('addGuestBtn'),
+  guestNameInput: $('guestNameInput'),
+  guestListPanel: $('guestListPanel'),
+  guestListDisplay: $('guestListDisplay'),
   vipUserInput: $('vipUserInput'),
   addVipUserBtn: $('addVipUserBtn'),
   vipUserList: $('vipUserList'),
@@ -232,20 +166,6 @@ const dom = {
   vipCodeUses: $('vipCodeUses'),
   vipCodeList: $('vipCodeList'),
   vipStatus: $('vipStatus'),
-  paymentEnableToggle: $('paymentEnableToggle'),
-  paymentLabelInput: $('paymentLabelInput'),
-  paymentUrlInput: $('paymentUrlInput'),
-  paymentSaveBtn: $('paymentSaveBtn'),
-  paymentStatus: $('paymentStatus'),
-  turnEnableToggle: $('turnEnableToggle'),
-  turnAdvanced: $('turnAdvanced'),
-  turnHostInput: $('turnHostInput'),
-  turnPortInput: $('turnPortInput'),
-  turnTlsPortInput: $('turnTlsPortInput'),
-  turnUsernameInput: $('turnUsernameInput'),
-  turnPasswordInput: $('turnPasswordInput'),
-  turnSaveBtn: $('turnSaveBtn'),
-  turnStatus: $('turnStatus'),
   btnSendPublic: $('btnSendPublic'),
   inputPublic: $('inputPublic'),
   btnSendPrivate: $('btnSendPrivate'),
@@ -260,10 +180,8 @@ const dom = {
   arcadeStatus: $('arcadeStatus'),
   htmlOverlayInput: $('htmlOverlayInput'),
   overlayStatus: $('overlayStatus'),
-  overlayFields: $('overlayFields'),
   userList: $('userList'),
-  openStreamBtn: $('openStreamBtn'),
-  vipRequiredToggle: $('vipRequiredToggle')
+  openStreamBtn: $('openStreamBtn')
 };
 
 function applyRoomQueryDefaults() {
@@ -282,21 +200,9 @@ function applyRoomQueryDefaults() {
     state.iAmHost = true;
     state.wasHost = true;
   }
-
-  return { roomValue, roleParam };
 }
 
-function maybeAutoJoinHost() {
-  const params = new URLSearchParams(window.location.search);
-  const roomParam = params.get('room');
-  const roleParam = params.get('role');
-  if (!roomParam || roleParam !== 'host') return;
-  if (dom.joinBtn && !dom.joinBtn.disabled) {
-    dom.joinBtn.click();
-  }
-}
-
-window.addEventListener('load', maybeAutoJoinHost);
+window.addEventListener('load', applyRoomQueryDefaults);
 
 // ======================================================
 // CANVAS MIXER MODULE (CAMERA -> CANVAS -> CAPTURESTREAM)
@@ -412,7 +318,6 @@ function drawMixer(timestamp) {
 
   if (state.overlayActive && state.overlayImage.complete) {
     ctx.drawImage(state.overlayImage, 0, 0, canvas.width, canvas.height);
-    drawOverlayVideos(ctx);
   }
 }
 
@@ -551,643 +456,6 @@ function buildChatHTMLFromLogs(maxLines = 12) {
     .join('');
 }
 
-const TEXT_LIKE_TAGS = new Set([
-  'div',
-  'span',
-  'p',
-  'h1',
-  'h2',
-  'h3',
-  'h4',
-  'h5',
-  'h6',
-  'small',
-  'strong',
-  'em',
-  'b',
-  'i',
-  'label'
-]);
-
-const KNOWN_OVERLAY_FIELDS = [
-  'ticker',
-  'tickerTop',
-  'tickerBottom',
-  'tickerMain',
-  'headline',
-  'score',
-  'djName',
-  'logo'
-];
-
-function getOverlayFieldAttribute(el) {
-  if (!el || !el.getAttribute) return '';
-  const dataOverlay = el.getAttribute('data-overlay');
-  if (dataOverlay && dataOverlay.trim()) return dataOverlay.trim();
-  const dataField = el.getAttribute('data-field');
-  if (dataField && dataField.trim()) return dataField.trim();
-  const dataOverlayField = el.getAttribute('data-overlay-field');
-  if (dataOverlayField && dataOverlayField.trim()) return dataOverlayField.trim();
-  return '';
-}
-
-function getOverlayFieldAttribute(el) {
-  if (!el || !el.getAttribute) return '';
-  const dataOverlay = el.getAttribute('data-overlay');
-  if (dataOverlay && dataOverlay.trim()) return dataOverlay.trim();
-  const dataOverlayField = el.getAttribute('data-overlay-field');
-  if (dataOverlayField && dataOverlayField.trim()) return dataOverlayField.trim();
-  return '';
-}
-
-function getOverlayFieldName(el) {
-  if (!el || !el.getAttribute) return '';
-  const dataName = getOverlayFieldAttribute(el);
-  if (dataName) return dataName;
-  const id = el.getAttribute('id');
-  if (id && id.trim()) return id.trim();
-  return '';
-}
-
-function getOverlayFieldType(el) {
-  const tag = el.tagName.toLowerCase();
-  if (tag === 'img') return 'image';
-  if (tag === 'video') return 'video';
-  if (tag === 'iframe') return 'video';
-  if (tag === 'source' && el.parentElement?.tagName?.toLowerCase() === 'video') {
-    return 'video';
-  }
-  if (TEXT_LIKE_TAGS.has(tag)) return 'text';
-  return 'text';
-}
-
-function ensureOverlayContainer() {
-  if (state.overlayContainer) return state.overlayContainer;
-  const container = document.createElement('div');
-  container.id = 'overlaySandbox';
-  container.style.cssText =
-    'position:fixed; left:-9999px; top:-9999px; width:1920px; height:1080px; opacity:0; pointer-events:none;';
-  document.body.appendChild(container);
-  state.overlayContainer = container;
-  return container;
-}
-
-function escapeOverlaySelector(value) {
-  if (window.CSS && typeof window.CSS.escape === 'function') {
-    return window.CSS.escape(value);
-  }
-  return String(value).replace(/[^a-zA-Z0-9_-]/g, '\\$&');
-}
-
-function resolveOverlaySelector(el, fieldName) {
-  if (el?.hasAttribute) {
-    if (el.hasAttribute('data-overlay')) {
-      return `[data-overlay="${escapeOverlaySelector(fieldName)}"]`;
-    }
-    if (el.hasAttribute('data-overlay-field')) {
-      return `[data-overlay-field="${escapeOverlaySelector(fieldName)}"]`;
-    }
-  }
-  if (el?.id && el.id.trim()) {
-    return `#${escapeOverlaySelector(el.id.trim())}`;
-  }
-  if (el?.classList && el.classList.length) {
-    const match = Array.from(el.classList).find(
-      (cls) => cls === fieldName || cls.toLowerCase() === fieldName.toLowerCase()
-    );
-    if (match) return `.${escapeOverlaySelector(match)}`;
-  }
-  return `#${escapeOverlaySelector(fieldName)}`;
-}
-
-function buildOverlayCandidateSelector(el) {
-  if (!el || el.nodeType !== 1) return '';
-  if (el.id && el.id.trim()) {
-    return `#${escapeOverlaySelector(el.id.trim())}`;
-  }
-  if (el.hasAttribute('data-overlay')) {
-    const dataAttr = el.getAttribute('data-overlay');
-    if (dataAttr && dataAttr.trim()) {
-      return `[data-overlay="${escapeOverlaySelector(dataAttr.trim())}"]`;
-    }
-  }
-  if (el.hasAttribute('data-overlay-field')) {
-    const dataAttr = el.getAttribute('data-overlay-field');
-    if (dataAttr && dataAttr.trim()) {
-      return `[data-overlay-field="${escapeOverlaySelector(dataAttr.trim())}"]`;
-    }
-  }
-
-  const segments = [];
-  let current = el;
-  while (current && current.nodeType === 1) {
-    if (current.tagName.toLowerCase() === 'body') break;
-    let segment = current.tagName.toLowerCase();
-    if (current.classList && current.classList.length) {
-      segment +=
-        '.' +
-        Array.from(current.classList)
-          .filter(Boolean)
-          .map((cls) => escapeOverlaySelector(cls))
-          .join('.');
-    }
-    const parent = current.parentElement;
-    if (parent) {
-      const siblings = Array.from(parent.children).filter(
-        (child) => child.tagName === current.tagName
-      );
-      if (siblings.length > 1) {
-        const index = siblings.indexOf(current) + 1;
-        segment += `:nth-of-type(${index})`;
-      }
-    }
-    segments.unshift(segment);
-    current = current.parentElement;
-  }
-  return segments.join(' > ');
-}
-
-function getOverlayCandidateSummary(el) {
-  if (!el || !el.tagName) return 'Unknown element';
-  const tag = el.tagName.toLowerCase();
-  const idPart = el.id ? `#${el.id}` : '';
-  const classPart = el.classList?.length
-    ? `.${Array.from(el.classList).slice(0, 2).join('.')}`
-    : '';
-  let detail = '';
-  if (tag === 'img' || tag === 'source' || tag === 'video') {
-    detail = (el.getAttribute('src') || '').trim();
-  } else {
-    detail = (el.textContent || '').trim();
-  }
-  if (detail.length > 42) detail = `${detail.slice(0, 39)}...`;
-  return `${tag}${idPart}${classPart}${detail ? ` → ${detail}` : ''}`;
-}
-
-function collectOverlayMappingCandidates(doc) {
-  const candidates = [];
-  const selector = ['img', 'video', 'source', ...TEXT_LIKE_TAGS].join(',');
-  const nodes = Array.from(doc.querySelectorAll(selector));
-  nodes.forEach((el, index) => {
-    const type = getOverlayFieldType(el);
-    const selectorValue = buildOverlayCandidateSelector(el);
-    if (!selectorValue) return;
-    const initialValue =
-      type === 'text'
-        ? (el.textContent || '').trim()
-        : (el.getAttribute('src') || '').trim();
-    candidates.push({
-      id: `candidate-${index}`,
-      type,
-      selector: selectorValue,
-      initialValue,
-      summary: getOverlayCandidateSummary(el)
-    });
-  });
-  return candidates;
-}
-
-function renderOverlayMappingControls(candidates) {
-  if (!dom.overlayFields) return;
-  dom.overlayFields.innerHTML = '';
-
-  const wrapper = document.createElement('div');
-  wrapper.className = 'overlay-map';
-
-  const title = document.createElement('div');
-  title.className = 'overlay-map-title';
-  title.textContent = 'Map overlay fields';
-  wrapper.appendChild(title);
-
-  const desc = document.createElement('p');
-  desc.className = 'overlay-map-desc';
-  desc.textContent =
-    'No data-overlay tags were found. Enter a field name for any element you want to control.';
-  wrapper.appendChild(desc);
-
-  const list = document.createElement('div');
-  list.className = 'overlay-map-list';
-
-  candidates.forEach((candidate) => {
-    const row = document.createElement('div');
-    row.className = 'overlay-map-row';
-
-    const summary = document.createElement('div');
-    summary.className = 'overlay-map-target';
-    summary.textContent = candidate.summary;
-    row.appendChild(summary);
-
-    const input = document.createElement('input');
-    input.type = 'text';
-    input.placeholder = 'Field name (e.g. tickerMain)';
-    input.dataset.candidateId = candidate.id;
-    row.appendChild(input);
-
-    list.appendChild(row);
-  });
-
-  wrapper.appendChild(list);
-
-  const actions = document.createElement('div');
-  actions.className = 'overlay-map-actions';
-
-  const applyBtn = document.createElement('button');
-  applyBtn.className = 'btn primary small';
-  applyBtn.textContent = 'Apply Mapping';
-  applyBtn.onclick = () => applyOverlayMapping();
-  actions.appendChild(applyBtn);
-
-  const cancelBtn = document.createElement('button');
-  cancelBtn.className = 'btn small secondary';
-  cancelBtn.textContent = 'Cancel';
-  cancelBtn.onclick = () => clearOverlayMapping();
-  actions.appendChild(cancelBtn);
-
-  wrapper.appendChild(actions);
-  dom.overlayFields.appendChild(wrapper);
-}
-
-function applyOverlayMapping() {
-  if (!state.overlayMappingPending) return;
-  const candidates = state.overlayMappingCandidates || [];
-  const used = new Set();
-  const mappings = [];
-
-  dom.overlayFields
-    .querySelectorAll('.overlay-map-row input')
-    .forEach((input) => {
-      const name = input.value.trim();
-      if (!name || used.has(name)) return;
-      const candidate = candidates.find((item) => item.id === input.dataset.candidateId);
-      if (!candidate) return;
-      used.add(name);
-      mappings.push({
-        name,
-        type: candidate.type,
-        selector: candidate.selector,
-        initialValue: candidate.initialValue
-      });
-    });
-
-  if (!mappings.length) {
-    window.alert('Enter at least one field name to continue.');
-    return;
-  }
-
-  state.overlayMappingPending = false;
-  state.overlayMappingCandidates = [];
-  const pendingHTML = state.pendingOverlayHTML;
-  state.pendingOverlayHTML = '';
-
-  state.overlayFields = mappings;
-  state.overlayFieldValues = {};
-  mappings.forEach((field) => {
-    state.overlayFieldValues[field.name] = field.initialValue;
-  });
-  renderOverlayFieldControls();
-  renderHTMLLayout(pendingHTML);
-  if (dom.overlayStatus) dom.overlayStatus.textContent = '[Loaded]';
-}
-
-function clearOverlayMapping() {
-  state.overlayMappingPending = false;
-  state.overlayMappingCandidates = [];
-  state.pendingOverlayHTML = '';
-  if (dom.overlayFields) dom.overlayFields.innerHTML = '';
-  if (dom.overlayStatus) dom.overlayStatus.textContent = '[Mapping Cancelled]';
-}
-
-function detectOverlayFields(doc) {
-  const fields = [];
-  const used = new Set();
-
-  doc.querySelectorAll('[data-overlay], [data-overlay-field]').forEach((el) => {
-    const name = getOverlayFieldName(el);
-    if (!name || used.has(name)) return;
-    used.add(name);
-    const type = getOverlayFieldType(el);
-    const selectorValue = buildOverlayCandidateSelector(el);
-    if (!selectorValue) return;
-    const initialValue =
-      type === 'text'
-        ? (el.textContent || '').trim()
-        : (el.getAttribute('src') || '').trim();
-    const suggestedName = getCandidateSuggestedName(el);
-    const suggestionSource =
-      suggestedName || el.getAttribute('class') || el.getAttribute('id') || '';
-    const suggestedType = detectSuggestedFieldType(suggestionSource);
-    candidates.push({
-      id: `candidate-${candidates.length}`,
-      type,
-      selector: selectorValue,
-      initialValue,
-      summary: getOverlayCandidateSummary(el),
-      suggestedName,
-      suggestedType,
-      source
-    });
-  };
-
-  orderedSelectors.forEach(({ selector, source }) => {
-    doc.querySelectorAll(selector).forEach((el) => pushCandidate(el, source));
-  });
-  return candidates;
-}
-
-  const findKnownElement = (fieldName) => {
-    const escapedName = escapeOverlaySelector(fieldName);
-    const dataMatch =
-      doc.querySelector(`[data-overlay="${escapedName}"]`) ||
-      doc.querySelector(`[data-overlay-field="${escapedName}"]`);
-    if (dataMatch) return dataMatch;
-    const directMatch = doc.getElementById(fieldName) || doc.querySelector(`.${escapedName}`);
-    if (directMatch) return directMatch;
-    const lowerName = fieldName.toLowerCase();
-    return Array.from(doc.querySelectorAll('[id], [class]')).find((candidate) => {
-      if (candidate.id && candidate.id.toLowerCase() === lowerName) return true;
-      return Array.from(candidate.classList || []).some(
-        (cls) => cls.toLowerCase() === lowerName
-      );
-    });
-
-    const nameInput = document.createElement('input');
-    nameInput.type = 'text';
-    nameInput.className = 'overlay-map-name';
-    nameInput.placeholder = 'Field name';
-    nameInput.dataset.candidateId = candidate.id;
-
-    const customInput = document.createElement('input');
-    customInput.type = 'text';
-    customInput.className = 'overlay-map-custom';
-    customInput.placeholder = 'Custom field name';
-    customInput.dataset.candidateId = candidate.id;
-
-    if (candidate.suggestedType) {
-      select.value = candidate.suggestedType;
-    } else if (candidate.suggestedName) {
-      select.value = 'text';
-    }
-
-    nameInput.value = candidate.suggestedName || candidate.suggestedType || '';
-
-    const refreshCustomVisibility = () => {
-      const isCustom = select.value === 'custom';
-      customInput.style.display = isCustom ? 'block' : 'none';
-      nameInput.style.display = isCustom ? 'none' : 'block';
-    };
-    select.addEventListener('change', refreshCustomVisibility);
-    refreshCustomVisibility();
-
-    controls.appendChild(select);
-    controls.appendChild(nameInput);
-    controls.appendChild(customInput);
-
-    const groupInput = document.createElement('input');
-    groupInput.type = 'text';
-    groupInput.className = 'overlay-map-group';
-    groupInput.placeholder = 'Group (optional)';
-    groupInput.dataset.candidateId = candidate.id;
-
-    controls.appendChild(groupInput);
-    row.appendChild(controls);
-
-    list.appendChild(row);
-  });
-
-  return fields;
-}
-
-function buildOverlayFieldsFromHTML(htmlString) {
-  const parser = new DOMParser();
-  const doc = parser.parseFromString(htmlString, 'text/html');
-  const fields = detectOverlayFields(doc);
-
-  if (!fields.length) {
-    const candidates = collectOverlayMappingCandidates(doc);
-    if (candidates.length) {
-      state.overlayMappingPending = true;
-      state.overlayMappingCandidates = candidates;
-      state.pendingOverlayHTML = htmlString;
-      renderOverlayMappingControls(candidates);
-      if (dom.overlayStatus) dom.overlayStatus.textContent = '[Mapping Required]';
-      return;
-    }
-  }
-
-  state.overlayMappingPending = false;
-  state.overlayMappingCandidates = [];
-  state.pendingOverlayHTML = '';
-  state.overlayFields = fields;
-  state.overlayFieldValues = {};
-  mappings.forEach((field) => {
-    state.overlayFieldValues[field.name] = field.initialValue;
-  });
-  renderOverlayFieldControls();
-  renderHTMLLayout(pendingHTML);
-  if (dom.overlayStatus) dom.overlayStatus.textContent = '[Mapping Active]';
-}
-
-function clearOverlayMapping() {
-  state.overlayMappingPending = false;
-  state.overlayMappingCandidates = [];
-  state.overlayMappingActive = false;
-  state.overlayLastCandidates = [];
-  state.pendingOverlayHTML = '';
-  if (dom.overlayFields) dom.overlayFields.innerHTML = '';
-  if (dom.overlayStatus) dom.overlayStatus.textContent = '[Mapping Cancelled]';
-}
-
-function reopenOverlayMapping() {
-  if (!state.overlayLastCandidates.length || !state.pendingOverlayHTML) return;
-  state.overlayMappingPending = true;
-  state.overlayMappingCandidates = state.overlayLastCandidates;
-  state.overlayMappingActive = false;
-  renderOverlayMappingControls(state.overlayLastCandidates);
-  if (dom.overlayStatus) dom.overlayStatus.textContent = '[Mapping Required]';
-}
-
-function buildOverlayFieldsFromHTML(htmlString) {
-  const parser = new DOMParser();
-  const doc = parser.parseFromString(htmlString, 'text/html');
-  const candidates = collectOverlayMappingCandidates(doc);
-
-  if (candidates.length) {
-    state.overlayMappingPending = true;
-    state.overlayMappingCandidates = candidates;
-    state.overlayLastCandidates = candidates;
-    state.pendingOverlayHTML = htmlString;
-    state.overlayMappingActive = false;
-    renderOverlayMappingControls(candidates);
-    if (dom.overlayStatus) dom.overlayStatus.textContent = '[Mapping Required]';
-    return;
-  }
-
-  state.overlayMappingPending = false;
-  state.overlayMappingCandidates = [];
-  state.overlayMappingActive = false;
-  state.overlayLastCandidates = [];
-  state.pendingOverlayHTML = '';
-  state.overlayFields = [];
-  state.overlayFieldValues = {};
-  renderOverlayFieldControls();
-}
-
-function findOverlayElement(field) {
-  const container = ensureOverlayContainer();
-  if (!field?.selector) return null;
-  return container.querySelector(field.selector);
-}
-
-function prepareOverlayVideo(videoEl) {
-  if (!videoEl) return;
-  videoEl.muted = true;
-  videoEl.loop = true;
-  videoEl.playsInline = true;
-  videoEl.autoplay = true;
-  videoEl.controls = false;
-  const playPromise = videoEl.play();
-  if (playPromise && typeof playPromise.catch === 'function') {
-    playPromise.catch(() => {});
-  }
-}
-
-function applyOverlayFieldValues(container) {
-  state.overlayFields.forEach((field) => {
-    const elements = container.querySelectorAll(field.selector);
-    if (!elements.length) return;
-    const value = state.overlayFieldValues[field.name] ?? '';
-
-    elements.forEach((el) => {
-      if (field.type === 'text') {
-        el.textContent = value;
-        return;
-      }
-
-      if (field.type === 'image') {
-        el.setAttribute('src', value);
-        return;
-      }
-
-      if (field.type === 'video') {
-        if (el.tagName.toLowerCase() === 'iframe') {
-          el.setAttribute('src', value);
-          return;
-        }
-        if (el.tagName.toLowerCase() === 'source') {
-          el.setAttribute('src', value);
-          const video = el.parentElement;
-          if (video && video.tagName.toLowerCase() === 'video') {
-            video.load();
-            prepareOverlayVideo(video);
-          }
-        } else {
-          el.setAttribute('src', value);
-          el.load?.();
-          prepareOverlayVideo(el);
-        }
-      }
-    });
-  });
-}
-
-function drawOverlayVideos(ctx) {
-  if (!state.overlayContainer || !state.overlayVideoElements.length) return;
-  const containerRect = state.overlayContainer.getBoundingClientRect();
-  if (!containerRect.width || !containerRect.height) return;
-
-  const scaleX = canvas.width / containerRect.width;
-  const scaleY = canvas.height / containerRect.height;
-
-  state.overlayVideoElements.forEach((video) => {
-    if (!video || video.readyState < 2) return;
-    const rect = video.getBoundingClientRect();
-    const x = (rect.left - containerRect.left) * scaleX;
-    const y = (rect.top - containerRect.top) * scaleY;
-    const w = rect.width * scaleX;
-    const h = rect.height * scaleY;
-    if (w > 0 && h > 0) {
-      ctx.drawImage(video, x, y, w, h);
-    }
-  });
-}
-
-function updateOverlayFieldValue(name, value) {
-  if (!name) return;
-  state.overlayFieldValues[name] = value;
-  if (state.overlayActive && state.currentRawHTML) {
-    renderHTMLLayout(state.currentRawHTML);
-  }
-}
-
-function renderOverlayFieldControls() {
-  if (!dom.overlayFields) return;
-  if (state.overlayMappingPending) return;
-  dom.overlayFields.innerHTML = '';
-  if (!state.overlayFields.length) return;
-
-  const header = document.createElement('div');
-  header.className = 'overlay-field-header';
-
-  const title = document.createElement('span');
-  title.textContent = 'Overlay fields';
-  header.appendChild(title);
-
-  if (state.overlayLastCandidates.length) {
-    const remapButton = document.createElement('button');
-    remapButton.className = 'btn small secondary';
-    remapButton.textContent = 'Remap';
-    remapButton.onclick = () => reopenOverlayMapping();
-    header.appendChild(remapButton);
-  }
-
-  dom.overlayFields.appendChild(header);
-
-  state.overlayFields.forEach((field) => {
-    const row = document.createElement('div');
-    row.className = 'overlay-field';
-
-    const label = document.createElement('label');
-    label.textContent = field.label || field.name;
-    row.appendChild(label);
-
-    const value = state.overlayFieldValues[field.name] ?? '';
-
-    if (field.type === 'text') {
-      const isLong = value.length > 60 || value.includes('\n');
-      const input = document.createElement(isLong ? 'textarea' : 'input');
-      if (field.inputType === 'number' || field.inputType === 'score') {
-        input.type = 'number';
-      }
-      input.value = value;
-      input.oninput = () => updateOverlayFieldValue(field.name, input.value);
-      row.appendChild(input);
-    } else if (field.type === 'image' || field.type === 'video') {
-      const urlInput = document.createElement('input');
-      urlInput.type = 'text';
-      urlInput.placeholder = field.type === 'image' ? 'Image URL' : 'Video URL';
-      urlInput.value = value;
-      urlInput.onchange = () => updateOverlayFieldValue(field.name, urlInput.value.trim());
-      row.appendChild(urlInput);
-
-      const fileInput = document.createElement('input');
-      fileInput.type = 'file';
-      fileInput.accept = field.type === 'image' ? 'image/*' : 'video/*';
-      fileInput.onchange = () => {
-        const file = fileInput.files?.[0];
-        if (!file) return;
-        const previousUrl = state.overlayObjectUrls[field.name];
-        if (previousUrl) URL.revokeObjectURL(previousUrl);
-        const objectUrl = URL.createObjectURL(file);
-        state.overlayObjectUrls[field.name] = objectUrl;
-        updateOverlayFieldValue(field.name, objectUrl);
-      };
-      row.appendChild(fileInput);
-    }
-
-    dom.overlayFields.appendChild(row);
-  });
-}
-
 function renderHTMLLayout(htmlString) {
   if (!htmlString) return;
   state.currentRawHTML = htmlString;
@@ -1204,21 +472,11 @@ function renderHTMLLayout(htmlString) {
     .replace(/{{title}}/g, streamTitle)
     .replace(/{{chat}}/g, chatHTML);
 
-  const container = ensureOverlayContainer();
-  container.innerHTML = `
-    <div class="layout-${state.mixerLayout}" style="width:100%; height:100%; margin:0; padding:0;">
-      ${processedHTML}
-    </div>
-  `;
-  applyOverlayFieldValues(container);
-  state.overlayVideoElements = Array.from(container.querySelectorAll('video'));
-  state.overlayVideoElements.forEach((video) => prepareOverlayVideo(video));
-
   const svg = `
         <svg xmlns="http://www.w3.org/2000/svg" width="1920" height="1080">
             <foreignObject width="100%" height="100%">
-                <div xmlns="http://www.w3.org/1999/xhtml" style="width:100%; height:100%; margin:0; padding:0;">
-                    ${container.innerHTML}
+                <div xmlns="http://www.w3.org/1999/xhtml" class="layout-${state.mixerLayout}" style="width:100%; height:100%; margin:0; padding:0;">
+                    ${processedHTML}
                 </div>
             </foreignObject>
         </svg>`;
@@ -1227,13 +485,47 @@ function renderHTMLLayout(htmlString) {
     state.overlayImage.src =
       'data:image/svg+xml;base64,' + btoa(unescape(encodeURIComponent(svg)));
     state.overlayActive = true;
-    state.overlayRenderCount += 1;
-    if (window.__overlayTestHooks?.onRender) {
-      window.__overlayTestHooks.onRender(state.overlayRenderCount);
-    }
   } catch (e) {
     console.error('[Overlay] Failed to encode SVG', e);
   }
+}
+
+function drawOverlay(context) {
+    if (!overlayState.active) return; //
+    if (overlayState.needsRedraw) refreshOverlayImage(); //
+    if (overlayState.image.complete) {
+        context.drawImage(overlayState.image, 0, 0, canvas.width, canvas.height); //
+    }
+}
+
+function renderHTMLLayout(htmlString) {
+    if (!htmlString) return; //
+    ensureOverlayRoot(); //
+    const templateChanged = htmlString !== overlayState.templateRaw; //
+    currentRawHTML = htmlString; //
+    overlayState.templateRaw = htmlString; //
+
+    const previousValues = getOverlayFieldValues(); //
+    const processedHTML = applyOverlayTemplateTokens(htmlString); //
+
+    overlayRoot.innerHTML = processedHTML; //
+    overlayState.fieldIds = detectOverlayFields(); //
+
+    overlayState.fieldIds.forEach(id => {
+        if (!Object.prototype.hasOwnProperty.call(previousValues, id)) return; //
+        const target = overlayRoot.querySelector(`#${escapeOverlaySelector(id)}`); //
+        if (target) target.innerHTML = previousValues[id]; //
+    }); //
+
+    if (templateChanged) {
+        buildOverlayFieldsUI(); //
+    } else if (!$('overlayFields')?.childElementCount) {
+        buildOverlayFieldsUI(); //
+    }
+
+    overlayState.active = true; //
+    overlayActive = true; //
+    overlayState.needsRedraw = true; //
 }
 
 window.setMixerLayout = (mode) => {
@@ -1581,9 +873,6 @@ function updateStreamButton(isLive) {
 function stopStream() {
     state.isStreaming = false; //
     updateStreamButton(false); //
-    if (state.currentRoom) {
-      socket.emit('update-room-live', { roomName: state.currentRoom, isLive: false });
-    }
 
     Object.values(viewerPeers).forEach(pc => pc.close()); //
     for (const k in viewerPeers) {
@@ -1606,9 +895,6 @@ async function startStream() {
 
     state.isStreaming = true; //
     updateStreamButton(true); //
-    if (state.currentRoom) {
-      socket.emit('update-room-live', { roomName: state.currentRoom, isLive: true });
-    }
 
   state.latestUserList.forEach((u) => {
     if (u.id !== state.myId) {
@@ -1643,9 +929,8 @@ if (startStreamBtn) {
  * PeerConnection impact: registers ICE + track handlers.
  */
 function setupCallPeerConnection(targetId, name) {
-    const pc = new RTCPeerConnection(getRtcConfig()); //
+    const pc = new RTCPeerConnection(iceConfig); //
     callPeers[targetId] = { pc, name }; //
-    attachCandidateDiagnostics(pc, `Call:${name || targetId}`); //
 
     pc.onicecandidate = e => {
         if (e.candidate) {
@@ -1666,8 +951,8 @@ function setupCallPeerConnection(targetId, name) {
  * PeerConnection impact: adds local media tracks for the call.
  */
 function attachLocalTracksToCall(pc) {
-    if (!state.localStream) return;
-    state.localStream.getTracks().forEach((t) => pc.addTrack(t, state.localStream));
+    if (!localStream) return; //
+    localStream.getTracks().forEach(t => pc.addTrack(t, localStream)); //
 }
 
 const hangupBtn = $('hangupBtn'); //
@@ -1735,11 +1020,20 @@ async function callPeer(targetId) {
     await startLocalMedia();
   }
 
-  const pc = setupCallPeerConnection(targetId, 'Peer');
-  attachLocalTracksToCall(pc);
+  const pc = new RTCPeerConnection(iceConfig);
+  callPeers[targetId] = { pc, name: 'Peer' };
 
-  const offer = await pc.createOffer();
-  await pc.setLocalDescription(offer);
+  pc.onicecandidate = (e) => {
+    if (e.candidate) {
+      socket.emit('call-ice', {
+        targetId,
+        candidate: e.candidate
+      });
+    }
+  };
+
+    const pc = setupCallPeerConnection(targetId, "Peer"); //
+    attachLocalTracksToCall(pc); //
 
   socket.emit('call-offer', { targetId, offer });
 
@@ -1753,20 +1047,22 @@ async function callPeer(targetId) {
  * PeerConnection impact: sets remote description, creates answer.
  */
 async function handleIncomingCall({ from, name, offer }) {
-  if (!state.localStream) {
-    await startLocalMedia();
-  }
+    if (!localStream) {
+        await startLocalMedia(); //
+    }
+  };
 
-  const pc = setupCallPeerConnection(from, name);
-  attachLocalTracksToCall(pc);
+    const pc = setupCallPeerConnection(from, name); //
 
-  await pc.setRemoteDescription(new RTCSessionDescription(offer));
-  const answer = await pc.createAnswer();
-  await pc.setLocalDescription(answer);
+  state.localStream.getTracks().forEach((t) => pc.addTrack(t, state.localStream));
+
+    attachLocalTracksToCall(pc); //
 
   socket.emit('call-answer', { targetId: from, answer });
 
-  renderUserList();
+    socket.emit('call-answer', { targetId: from, answer }); //
+
+    renderUserList(); //
 }
 
 socket.on('incoming-call', handleIncomingCall);
@@ -1836,9 +1132,9 @@ function endPeerCall(id, isIncomingSignal) {
 function attachBroadcastTracks(pc) {
     canvasStream.getTracks().forEach(t => pc.addTrack(t, canvasStream)); //
 
-    if (state.localStream) {
-        const at = state.localStream.getAudioTracks()[0];
-        if (at) pc.addTrack(at, state.localStream);
+    if (localStream) {
+        const at = localStream.getAudioTracks()[0]; //
+        if (at) pc.addTrack(at, mixedStream); //
     }
 }
 
@@ -1849,9 +1145,8 @@ function attachBroadcastTracks(pc) {
  * PeerConnection impact: adds mixer tracks + configures ICE.
  */
 function setupViewerPeerConnection(targetId) {
-    const pc = new RTCPeerConnection(getRtcConfig()); //
+    const pc = new RTCPeerConnection(iceConfig); //
     viewerPeers[targetId] = pc; //
-    attachCandidateDiagnostics(pc, `Broadcast:${targetId}`); //
 
     pc.createDataChannel("control"); //
 
@@ -1929,7 +1224,6 @@ socket.on('connect', () => {
     signalStatus.textContent = 'Connected';
   }
   state.myId = socket.id;
-  updatePrivacyControlAvailability();
 });
 
 socket.on('disconnect', () => {
@@ -1938,110 +1232,7 @@ socket.on('disconnect', () => {
     signalStatus.className = 'status-dot status-disconnected';
     signalStatus.textContent = 'Disconnected';
   }
-  updatePrivacyControlAvailability();
 });
-
-function emitWithAck(eventName, payload) {
-  return new Promise((resolve) => {
-    socket.emit(eventName, payload, resolve);
-  });
-}
-
-async function ensureHostRoom(roomName) {
-  const info = await emitWithAck('get-room-info', { roomName });
-  if (!info?.exists) {
-    const createResp = await emitWithAck('enter-host-room', {
-      roomName,
-      privacy: 'public'
-    });
-    if (!createResp?.ok) {
-      return { ok: false, error: createResp?.error || 'Unable to create room.' };
-    }
-    return { ok: true, created: true };
-  }
-
-  if (info.hasOwnerPassword) {
-    const storedPassword = sessionStorage.getItem(`hostPassword:${roomName}`);
-    const password = storedPassword || window.prompt('Enter host password for this room:') || '';
-    if (!password) {
-      return { ok: false, error: 'Host password is required to enter this room.' };
-    }
-    const authResp = await emitWithAck('enter-host-room', { roomName, password });
-    if (!authResp?.ok) {
-      return { ok: false, error: authResp?.error || 'Invalid password.' };
-    }
-    sessionStorage.setItem(`hostPassword:${roomName}`, password);
-  } else {
-    const authResp = await emitWithAck('enter-host-room', { roomName });
-    if (!authResp?.ok) {
-      return { ok: false, error: authResp?.error || 'Unable to enter room.' };
-    }
-  }
-
-  return { ok: true, created: false };
-}
-
-async function joinRoomAsHost(room) {
-  if (!room) return;
-  state.iAmHost = true;
-  state.wasHost = true;
-  if (state.joined && state.currentRoom === room) return;
-  if (state.joined && state.currentRoom && state.currentRoom !== room) {
-    window.location.href = `/index.html?room=${encodeURIComponent(room)}&role=host`;
-    return;
-  }
-
-  state.currentRoom = room;
-  const nameInput = $('nameInput');
-  state.userName = nameInput && nameInput.value.trim() ? nameInput.value.trim() : 'Host';
-
-  if (!socket.connected) socket.connect();
-
-  const access = await ensureHostRoom(room);
-  if (!access.ok) {
-    alert(access.error || 'Unable to access room.');
-    return;
-  }
-
-  socket.emit('join-room', { room, name: state.userName, isViewer: false }, (resp) => {
-    if (resp?.isHost) {
-      state.vipUsers = Array.isArray(resp.vipUsers) ? resp.vipUsers : [];
-      state.vipCodes = Array.isArray(resp.vipCodes) ? resp.vipCodes : [];
-      renderVipUsers();
-      renderVipCodes();
-      if (resp?.privacy) {
-        applyPrivacyState(resp.privacy === 'private', { emitUpdate: false });
-      }
-      if (typeof resp?.vipRequired === 'boolean') {
-        applyVipRequiredState(resp.vipRequired, { emitUpdate: false });
-      }
-      socket.emit('get-vip-codes', { roomName: room }, (codesResp) => {
-        if (codesResp?.ok) {
-          state.vipCodes = Array.isArray(codesResp.codes) ? codesResp.codes : [];
-          renderVipCodes();
-        }
-      });
-      loadRoomConfig(room);
-    } else if (resp?.error) {
-      alert(resp.error);
-      return;
-    }
-    state.joined = true;
-    updatePrivacyControlAvailability();
-  });
-
-  if (dom.leaveBtn) dom.leaveBtn.disabled = false;
-
-  updateLink(room);
-  startLocalMedia();
-}
-
-async function autoJoinHostRoom(room) {
-  if (!room) return;
-  state.iAmHost = true;
-  state.wasHost = true;
-  await joinRoomAsHost(room);
-}
 
 if (dom.joinBtn) {
   dom.joinBtn.onclick = () => {
@@ -2049,7 +1240,75 @@ if (dom.joinBtn) {
     if (!room) return;
 
     state.currentRoom = room;
-    joinRoomAsHost(room);
+    const nameInput = $('nameInput');
+    state.userName = nameInput && nameInput.value.trim() ? nameInput.value.trim() : 'Host';
+
+    socket.connect();
+    const joinAsHost = () => {
+      socket.emit('join-room', { room, name: state.userName, isViewer: false }, (resp) => {
+        if (resp?.isHost) {
+          state.vipUsers = Array.isArray(resp.vipUsers) ? resp.vipUsers : [];
+          state.vipCodes = Array.isArray(resp.vipCodes) ? resp.vipCodes : [];
+          renderVipUsers();
+          renderVipCodes();
+          socket.emit('get-vip-codes', { roomName: room }, (codesResp) => {
+            if (codesResp?.ok) {
+              state.vipCodes = Array.isArray(codesResp.codes) ? codesResp.codes : [];
+              renderVipCodes();
+            }
+          });
+        } else if (resp?.error) {
+          alert(resp.error);
+          return;
+        }
+      });
+
+      dom.joinBtn.disabled = true;
+      if (dom.leaveBtn) dom.leaveBtn.disabled = false;
+
+      updateLink(room);
+      startLocalMedia();
+    };
+
+    socket.emit('check-room-claimed', { roomName: room }, (claimedResp) => {
+      if (!claimedResp?.claimed) {
+        state.iAmHost = true;
+        state.wasHost = true;
+        joinAsHost();
+        return;
+      }
+
+      const params = new URLSearchParams(window.location.search);
+      const authed = params.get('authed') === '1';
+      const cachedPassword = authed ? sessionStorage.getItem(`hostPassword:${room}`) : null;
+      const needsPassword = claimedResp?.hasPassword;
+      const password = needsPassword
+        ? cachedPassword || window.prompt('Enter host password for this room:') || ''
+        : '';
+
+      if (needsPassword && !password) {
+        alert('Host password is required to enter this room.');
+        return;
+      }
+
+      if (!needsPassword) {
+        state.iAmHost = true;
+        state.wasHost = true;
+        joinAsHost();
+        return;
+      }
+
+      socket.emit('auth-host-room', { roomName: room, password }, (authResp) => {
+        if (authResp?.ok) {
+          sessionStorage.setItem(`hostPassword:${room}`, password);
+          state.iAmHost = true;
+          state.wasHost = true;
+          joinAsHost();
+        } else {
+          alert(authResp?.error || 'Invalid password.');
+        }
+      });
+    });
   };
 }
 
@@ -2058,13 +1317,6 @@ if (dom.leaveBtn) {
     window.location.reload();
   };
 }
-
-window.addEventListener('load', () => {
-  const { roomValue, roleParam } = applyRoomQueryDefaults();
-  if (roleParam === 'host' && roomValue) {
-    autoJoinHostRoom(roomValue);
-  }
-});
 
 function generateQR(url) {
   const container = $('qrcode');
@@ -2093,6 +1345,16 @@ function updateLink(roomSlug) {
 }
 
 socket.on('user-joined', ({ id, name }) => {
+  if (state.iAmHost && state.isPrivateMode) {
+    const allowed = state.allowedGuests.some(
+      (g) => g.toLowerCase() === name.toLowerCase()
+    );
+    if (!allowed) {
+      socket.emit('kick-user', id);
+      return;
+    }
+  }
+
   const privateLog = $('chatLogPrivate');
   appendChat(privateLog, 'System', `${name} joined room`, Date.now());
 
@@ -2109,7 +1371,7 @@ socket.on('user-left', ({ id }) => {
   endPeerCall(id, true);
 });
 
-socket.on('room-update', ({ locked, streamTitle, ownerId, users, vipRequired, privacy }) => {
+socket.on('room-update', ({ locked, streamTitle, ownerId, users }) => {
   state.latestUserList = users || [];
   state.currentOwnerId = ownerId;
 
@@ -2130,21 +1392,9 @@ socket.on('room-update', ({ locked, streamTitle, ownerId, users, vipRequired, pr
 
   renderUserList();
 
-  if (typeof privacy === 'string') {
-    applyPrivacyState(privacy === 'private', { emitUpdate: false });
-  }
-  if (typeof vipRequired === 'boolean') {
-    applyVipRequiredState(vipRequired, { emitUpdate: false });
-  }
-
   if (state.overlayActive) {
     renderHTMLLayout(state.currentRawHTML);
   }
-});
-
-socket.on('vip-codes-updated', (codes) => {
-  state.vipCodes = Array.isArray(codes) ? codes : [];
-  renderVipCodes();
 });
 
 socket.on('role', async ({ isHost }) => {
@@ -2210,281 +1460,60 @@ if (dom.slugInput) {
   };
 }
 
-function canUpdateRoomSettings() {
-  return !!(state.currentRoom && state.joined && socket.connected);
-}
-
-function updateVipActionAvailability() {
-  const ready = canUpdateRoomSettings();
-  const vipName = dom.vipUserInput?.value.trim() || '';
-  if (dom.addVipUserBtn) {
-    dom.addVipUserBtn.disabled = !ready || !vipName;
-    if (!ready) {
-      dom.addVipUserBtn.title = 'Join a room to add VIP users.';
-    } else if (!vipName) {
-      dom.addVipUserBtn.title = 'Enter a VIP username first.';
-    } else {
-      dom.addVipUserBtn.title = '';
-    }
-  }
-
-  if (dom.generateVipCodeBtn) {
-    const canGenerate = ready && state.isPrivateMode && state.vipRequired;
-    dom.generateVipCodeBtn.disabled = !canGenerate;
-    if (!ready) {
-      dom.generateVipCodeBtn.title = 'Join a room to generate VIP codes.';
-    } else if (!state.isPrivateMode) {
-      dom.generateVipCodeBtn.title = 'Turn on Private Room to generate VIP codes.';
-    } else if (!state.vipRequired) {
-      dom.generateVipCodeBtn.title = 'Enable VIP Required to generate VIP codes.';
-    } else {
-      dom.generateVipCodeBtn.title = '';
-    }
-  }
-}
-
-function updatePrivacyControlAvailability() {
-  const ready = canUpdateRoomSettings();
-  if (dom.togglePrivateBtn) {
-    dom.togglePrivateBtn.disabled = !ready;
-    dom.togglePrivateBtn.title = ready ? '' : 'Join a room to change privacy.';
-  }
-  if (dom.publicRoomToggle) {
-    dom.publicRoomToggle.disabled = !ready;
-    dom.publicRoomToggle.title = ready ? '' : 'Join a room to change privacy.';
-  }
-  if (dom.vipRequiredToggle) {
-    dom.vipRequiredToggle.disabled = !ready || !state.isPrivateMode;
-    if (!ready) {
-      dom.vipRequiredToggle.title = 'Join a room to change VIP access.';
-    } else if (!state.isPrivateMode) {
-      dom.vipRequiredToggle.title = 'Turn on Private Room to require VIP codes.';
-    } else {
-      dom.vipRequiredToggle.title = '';
-    }
-  }
-  updateVipActionAvailability();
-}
-
-function applyPrivacyState(isPrivate, { emitUpdate = true } = {}) {
-  state.isPrivateMode = !!isPrivate;
-
-  if (dom.togglePrivateBtn) {
+if (dom.togglePrivateBtn) {
+  dom.togglePrivateBtn.onclick = () => {
+    state.isPrivateMode = !state.isPrivateMode;
     dom.togglePrivateBtn.textContent = state.isPrivateMode ? 'ON' : 'OFF';
     dom.togglePrivateBtn.className = state.isPrivateMode
       ? 'btn small danger'
       : 'btn small secondary';
-  }
 
-  if (dom.publicRoomToggle) {
-    dom.publicRoomToggle.checked = !state.isPrivateMode;
-  }
-
-  if (!state.isPrivateMode && state.vipRequired) {
-    applyVipRequiredState(false, { emitUpdate });
-  }
-
-  if (emitUpdate && state.currentRoom) {
-    socket.emit('update-room-privacy', {
-      roomName: state.currentRoom,
-      privacy: state.isPrivateMode ? 'private' : 'public'
-    }, (resp) => {
-      if (!resp?.ok) {
-        setVipStatus(resp?.error || 'Unable to update room privacy.', 'error');
-        return;
-      }
-      if (resp?.vipRequired === false && state.vipRequired) {
-        applyVipRequiredState(false, { emitUpdate: false });
-      }
-    });
-  }
-
-  updatePrivacyControlAvailability();
-}
-
-function applyVipRequiredState(isRequired, { emitUpdate = true } = {}) {
-  const nextRequired = !!isRequired;
-  if (nextRequired && !state.isPrivateMode) {
-    state.vipRequired = false;
-    if (dom.vipRequiredToggle) {
-      dom.vipRequiredToggle.textContent = 'OFF';
-      dom.vipRequiredToggle.className = 'btn small secondary';
+    if (dom.guestListPanel) {
+      dom.guestListPanel.style.display = state.isPrivateMode ? 'block' : 'none';
     }
-    return;
-  }
-  state.vipRequired = nextRequired;
-  if (dom.vipRequiredToggle) {
-    dom.vipRequiredToggle.textContent = state.vipRequired ? 'ON' : 'OFF';
-    dom.vipRequiredToggle.className = state.vipRequired
-      ? 'btn small danger'
-      : 'btn small secondary';
-  }
-  if (emitUpdate && state.currentRoom) {
-    socket.emit('update-vip-required', {
-      roomName: state.currentRoom,
-      vipRequired: state.vipRequired
-    }, (resp) => {
-      if (!resp?.ok) {
-        setVipStatus(resp?.error || 'Unable to update VIP access.', 'error');
-        if (state.vipRequired) {
-          applyVipRequiredState(false, { emitUpdate: false });
+
+    if (state.isPrivateMode) {
+      state.latestUserList.forEach((u) => {
+        if (
+          u.id !== state.myId &&
+          !state.allowedGuests.some((g) => g.toLowerCase() === u.name.toLowerCase())
+        ) {
+          socket.emit('kick-user', u.id);
         }
-        return;
-      }
-      if (typeof resp?.vipRequired === 'boolean' && resp.vipRequired !== state.vipRequired) {
-        applyVipRequiredState(resp.vipRequired, { emitUpdate: false });
-      }
-    });
-  }
-  updateVipActionAvailability();
+      });
+    }
+  };
 }
 
+if (dom.addGuestBtn) {
+  dom.addGuestBtn.onclick = () => {
+    if (!dom.guestNameInput) return;
+    const n = dom.guestNameInput.value.trim();
+    if (n && !state.allowedGuests.includes(n)) {
+      state.allowedGuests.push(n);
+      renderGuestList();
+      dom.guestNameInput.value = '';
+    }
+  };
+}
+
+function renderGuestList() {
+  if (!dom.guestListDisplay) return;
+
+  dom.guestListDisplay.innerHTML = '';
+  state.allowedGuests.forEach((name) => {
+    const t = document.createElement('span');
+    t.style.cssText =
+      'background:var(--accent); color:#000; padding:2px 6px; border-radius:4px; font-size:0.7rem; margin:2px;';
+    t.textContent = name;
+    dom.guestListDisplay.appendChild(t);
+  });
+}
 
 function setVipStatus(message, tone = 'muted') {
   if (!dom.vipStatus) return;
   dom.vipStatus.textContent = message || '';
   dom.vipStatus.style.color = tone === 'error' ? 'var(--danger)' : 'var(--muted)';
-}
-
-function setPaymentStatus(message, tone = 'muted') {
-  if (!dom.paymentStatus) return;
-  dom.paymentStatus.textContent = message || '';
-  dom.paymentStatus.style.color = tone === 'error' ? 'var(--danger)' : 'var(--muted)';
-}
-
-function setTurnStatus(message, tone = 'muted') {
-  if (!dom.turnStatus) return;
-  dom.turnStatus.textContent = message || '';
-  dom.turnStatus.style.color = tone === 'error' ? 'var(--danger)' : 'var(--muted)';
-}
-
-function applyPaymentConfig(config) {
-  state.paymentEnabled = !!config.paymentEnabled;
-  state.paymentLabel = config.paymentLabel || '';
-  state.paymentUrl = config.paymentUrl || '';
-
-  if (dom.paymentEnableToggle) {
-    dom.paymentEnableToggle.checked = state.paymentEnabled;
-  }
-  if (dom.paymentLabelInput) {
-    dom.paymentLabelInput.value = state.paymentLabel;
-  }
-  if (dom.paymentUrlInput) {
-    dom.paymentUrlInput.value = state.paymentUrl;
-  }
-}
-
-function applyTurnConfig(config) {
-  const turn = config?.turnConfig || config || {};
-  state.turnConfig = {
-    enabled: !!turn.enabled,
-    host: turn.host || '',
-    port: turn.port || '',
-    tlsPort: turn.tlsPort || '',
-    username: turn.username || '',
-    password: turn.password || ''
-  };
-
-  if (dom.turnEnableToggle) {
-    dom.turnEnableToggle.checked = state.turnConfig.enabled;
-  }
-  if (dom.turnHostInput) {
-    dom.turnHostInput.value = state.turnConfig.host;
-  }
-  if (dom.turnPortInput) {
-    dom.turnPortInput.value = state.turnConfig.port || '';
-  }
-  if (dom.turnTlsPortInput) {
-    dom.turnTlsPortInput.value = state.turnConfig.tlsPort || '';
-  }
-  if (dom.turnUsernameInput) {
-    dom.turnUsernameInput.value = state.turnConfig.username;
-  }
-  if (dom.turnPasswordInput) {
-    dom.turnPasswordInput.value = state.turnConfig.password;
-  }
-}
-
-function collectTurnConfigFromInputs() {
-  const enabled = !!dom.turnEnableToggle?.checked;
-  const host = dom.turnHostInput?.value.trim() || '';
-  const portValue = dom.turnPortInput?.value;
-  const port = portValue ? Number(portValue) : '';
-  const tlsPortValue = dom.turnTlsPortInput?.value;
-  const tlsPort = tlsPortValue ? Number(tlsPortValue) : '';
-  const username = dom.turnUsernameInput?.value.trim() || '';
-  const password = dom.turnPasswordInput?.value.trim() || '';
-
-  if (enabled) {
-    if (!host || !port) {
-      setTurnStatus('TURN host and port are required when relay is enabled.', 'error');
-      return null;
-    }
-    if (!username || !password) {
-      setTurnStatus('TURN username and password are required when relay is enabled.', 'error');
-      return null;
-    }
-  }
-
-  return {
-    enabled,
-    host,
-    port,
-    tlsPort,
-    username,
-    password
-  };
-}
-
-async function loadRoomConfig(roomName) {
-  if (!roomName) return;
-  const resp = await emitWithAck('get-room-config', { roomName });
-  if (resp?.ok) {
-    applyPaymentConfig(resp);
-    applyTurnConfig(resp.turnConfig);
-  }
-}
-
-function isValidPaymentUrl(value) {
-  return value.startsWith('http://') || value.startsWith('https://');
-}
-
-if (dom.paymentSaveBtn) {
-  dom.paymentSaveBtn.onclick = () => {
-    if (!state.currentRoom) {
-      setPaymentStatus('Join a room to save payment settings.', 'error');
-      return;
-    }
-
-    const enabled = !!dom.paymentEnableToggle?.checked;
-    const label = dom.paymentLabelInput?.value.trim() || '';
-    const url = dom.paymentUrlInput?.value.trim() || '';
-
-    if (url && !isValidPaymentUrl(url)) {
-      setPaymentStatus('Payment URL must start with http(s).', 'error');
-      return;
-    }
-
-    socket.emit(
-      'update-room-payments',
-      {
-        roomName: state.currentRoom,
-        paymentEnabled: enabled,
-        paymentLabel: label,
-        paymentUrl: url
-      },
-      (resp) => {
-        if (resp?.ok) {
-          state.paymentEnabled = enabled;
-          state.paymentLabel = label;
-          state.paymentUrl = url;
-          setPaymentStatus('Payment settings saved.');
-        } else {
-          setPaymentStatus(resp?.error || 'Unable to save payment settings.', 'error');
-        }
-      }
-    );
-  };
 }
 
 function renderVipUsers() {
@@ -2503,41 +1532,16 @@ function renderVipCodes() {
   if (!dom.vipCodeList) return;
   dom.vipCodeList.innerHTML = '';
   state.vipCodes.forEach((entry) => {
-    const row = document.createElement('div');
-    row.style.cssText =
-      'display:flex; align-items:center; justify-content:space-between; gap:6px; background:rgba(255,255,255,0.06); padding:4px 6px; border-radius:6px; font-size:0.7rem;';
-
-    const label = document.createElement('span');
+    const tag = document.createElement('span');
+    tag.style.cssText =
+      'background:var(--accent); color:#000; padding:2px 6px; border-radius:4px; font-size:0.7rem;';
     if (typeof entry === 'string') {
-      label.textContent = entry;
+      tag.textContent = entry;
     } else {
-      const isMultiUse = entry.multiUse || entry.maxUses === null;
-      const remaining = Number.isFinite(entry.usesLeft)
-        ? entry.usesLeft
-        : Math.max(0, (entry.maxUses || 0) - (entry.used || 0));
-      const usageLabel = isMultiUse ? '∞' : `${remaining}/${entry.maxUses}`;
-      label.textContent = `${entry.code} (${usageLabel})`;
+      const remaining = Math.max(0, (entry.maxUses || 0) - (entry.used || 0));
+      tag.textContent = `${entry.code} (${remaining}/${entry.maxUses})`;
     }
-
-    const revokeBtn = document.createElement('button');
-    revokeBtn.className = 'btn small danger';
-    revokeBtn.textContent = 'Revoke';
-    revokeBtn.onclick = () => {
-      if (!state.currentRoom || !entry?.code) return;
-      socket.emit('revoke-vip-code', { roomName: state.currentRoom, code: entry.code }, (resp) => {
-        if (!resp?.ok) {
-          setVipStatus(resp?.error || 'Unable to revoke VIP code.', 'error');
-        } else {
-          setVipStatus('VIP code revoked.');
-        }
-      });
-    };
-
-    row.appendChild(label);
-    if (entry?.code) {
-      row.appendChild(revokeBtn);
-    }
-    dom.vipCodeList.appendChild(row);
+    dom.vipCodeList.appendChild(tag);
   });
 }
 
@@ -2554,18 +1558,11 @@ if (dom.addVipUserBtn) {
         }
         setVipStatus('VIP user added.');
         dom.vipUserInput.value = '';
-        updateVipActionAvailability();
       } else {
         setVipStatus(resp?.error || 'Unable to add VIP user.', 'error');
       }
     });
   };
-}
-
-if (dom.vipUserInput) {
-  dom.vipUserInput.addEventListener('input', () => {
-    updateVipActionAvailability();
-  });
 }
 
 if (dom.generateVipCodeBtn) {
@@ -2574,69 +1571,16 @@ if (dom.generateVipCodeBtn) {
     const maxUses = dom.vipCodeUses ? Number(dom.vipCodeUses.value) : 1;
     socket.emit('generate-vip-code', { room: state.currentRoom, maxUses }, (resp) => {
       if (resp?.ok && resp?.code) {
-        socket.emit('get-vip-codes', { roomName: state.currentRoom }, (codesResp) => {
-          if (codesResp?.ok) {
-            state.vipCodes = Array.isArray(codesResp.codes) ? codesResp.codes : [];
-            renderVipCodes();
-          }
+        state.vipCodes.push({
+          code: resp.code,
+          maxUses: resp.maxUses || maxUses || 1,
+          used: 0
         });
+        renderVipCodes();
         setVipStatus('VIP code generated.');
       } else {
         setVipStatus(resp?.error || 'Unable to generate VIP code.', 'error');
       }
-    });
-  };
-}
-
-if (dom.togglePrivateBtn) {
-  dom.togglePrivateBtn.onclick = () => {
-    if (!canUpdateRoomSettings()) {
-      setVipStatus('Join a room to change privacy.', 'error');
-      return;
-    }
-    applyPrivacyState(!state.isPrivateMode);
-  };
-}
-
-if (dom.publicRoomToggle) {
-  dom.publicRoomToggle.onchange = () => {
-    if (!canUpdateRoomSettings()) {
-      setVipStatus('Join a room to change privacy.', 'error');
-      dom.publicRoomToggle.checked = !state.isPrivateMode;
-      return;
-    }
-    applyPrivacyState(!dom.publicRoomToggle.checked);
-  };
-}
-
-if (dom.vipRequiredToggle) {
-  dom.vipRequiredToggle.onclick = () => {
-    if (!canUpdateRoomSettings()) {
-      setVipStatus('Join a room to change VIP access.', 'error');
-      return;
-    }
-    if (!state.isPrivateMode && !state.vipRequired) {
-      setVipStatus('Turn on Private Room before enabling VIP access.', 'error');
-      return;
-    }
-    applyVipRequiredState(!state.vipRequired);
-  };
-}
-
-if (dom.turnSaveBtn) {
-  dom.turnSaveBtn.onclick = () => {
-    if (!state.currentRoom) return;
-    const turnConfig = collectTurnConfigFromInputs();
-    if (!turnConfig) return;
-    socket.emit('update-room-turn', { roomName: state.currentRoom, turnConfig }, (resp) => {
-      if (!resp?.ok) {
-        setTurnStatus(resp?.error || 'Unable to save TURN settings.', 'error');
-        return;
-      }
-      applyTurnConfig(turnConfig);
-      setTurnStatus(
-        turnConfig.enabled ? 'Relay enabled for this room.' : 'Relay disabled for this room.'
-      );
     });
   };
 }
@@ -2668,8 +1612,7 @@ function appendChat(log, name, text, ts) {
 function sendPublic() {
   if (!dom.inputPublic) return;
   const t = dom.inputPublic.value.trim();
-  if (!t || !state.currentRoom || !state.joined) return;
-  if (!socket.connected) socket.connect();
+  if (!t || !state.currentRoom) return;
 
   socket.emit('public-chat', {
     room: state.currentRoom,
@@ -2693,8 +1636,7 @@ if (dom.inputPublic) {
 function sendPrivate() {
   if (!dom.inputPrivate) return;
   const t = dom.inputPrivate.value.trim();
-  if (!t || !state.currentRoom || !state.joined) return;
-  if (!socket.connected) socket.connect();
+  if (!t || !state.currentRoom) return;
 
   socket.emit('private-chat', {
     room: state.currentRoom,
@@ -2844,12 +1786,8 @@ if (dom.htmlOverlayInput) {
 
     const r = new FileReader();
     r.onload = (ev) => {
-      const htmlString = ev.target.result;
-      buildOverlayFieldsFromHTML(htmlString);
-      if (!state.overlayMappingPending) {
-        renderHTMLLayout(htmlString);
-        if (dom.overlayStatus) dom.overlayStatus.textContent = '[Loaded]';
-      }
+      renderHTMLLayout(ev.target.result);
+      if (dom.overlayStatus) dom.overlayStatus.textContent = '[Loaded]';
     };
     r.readAsText(f);
   };
@@ -2858,43 +1796,7 @@ if (dom.htmlOverlayInput) {
 window.clearOverlay = () => {
   state.overlayActive = false;
   state.overlayImage = new Image();
-  state.currentRawHTML = '';
-  state.overlayFields = [];
-  state.overlayFieldValues = {};
-  state.overlayVideoElements = [];
-  state.overlayMappingPending = false;
-  state.overlayMappingCandidates = [];
-  state.pendingOverlayHTML = '';
-  Object.values(state.overlayObjectUrls).forEach((url) => URL.revokeObjectURL(url));
-  state.overlayObjectUrls = {};
-  if (dom.overlayFields) dom.overlayFields.innerHTML = '';
   if (dom.overlayStatus) dom.overlayStatus.textContent = '[Empty]';
-};
-
-window.__overlayTest = {
-  loadHTML(htmlString) {
-    buildOverlayFieldsFromHTML(htmlString);
-    if (!state.overlayMappingPending) {
-      renderHTMLLayout(htmlString);
-    }
-  },
-  getFields() {
-    return state.overlayFields.map((field) => ({ name: field.name, type: field.type }));
-  },
-  updateField(name, value) {
-    updateOverlayFieldValue(name, value);
-  },
-  getFieldValue(name) {
-    const field = state.overlayFields.find((item) => item.name === name);
-    if (!field) return null;
-    const el = findOverlayElement(field);
-    if (!el) return null;
-    if (field.type === 'text') return el.textContent || '';
-    return el.getAttribute('src') || '';
-  },
-  getRenderCount() {
-    return state.overlayRenderCount;
-  }
 };
 
 // ======================================================
@@ -2933,14 +1835,6 @@ function renderUserList() {
           ' <span title="Requesting to Join Stream">✋</span>';
       }
 
-      if (u.isVip) {
-        const vipBadge = document.createElement('span');
-        vipBadge.textContent = ' VIP';
-        vipBadge.style.cssText =
-          'margin-left:6px; font-size:0.6rem; color:#000; background:var(--accent); padding:2px 5px; border-radius:4px;';
-        nameSpan.appendChild(vipBadge);
-      }
-
       const statsBadge = document.createElement('small');
       statsBadge.id = `stats-${u.id}`;
       statsBadge.style.cssText = 'margin-left:8px; font-size:0.6rem; opacity:0.7;';
@@ -2974,11 +1868,7 @@ function renderUserList() {
         callBtn.style.color = 'var(--danger)';
         callBtn.onclick = () => endPeerCall(u.id);
       } else {
-        if (u.requestingCall) {
-          callBtn.textContent = u.isVip ? 'Accept & Call VIP' : 'Accept & Call';
-        } else {
-          callBtn.textContent = u.isVip ? 'Call VIP' : 'Call';
-        }
+        callBtn.textContent = u.requestingCall ? 'Accept & Call' : 'Call';
         if (u.requestingCall) callBtn.style.borderColor = 'var(--accent)';
         callBtn.onclick = () => window.ringUser(u.id);
       }
@@ -3067,8 +1957,6 @@ if (dom.openStreamBtn) {
     if (u) window.open(u, '_blank');
   };
 }
-
-updatePrivacyControlAvailability();
 
 // ======================================================
 // HELPER / GUIDE (Developer Notes)

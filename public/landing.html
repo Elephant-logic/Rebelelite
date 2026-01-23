@@ -5,7 +5,7 @@
   <title>Rebel Stream • Landing</title>
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <link rel="stylesheet" href="style.css" />
-  <script src="/socket.io/socket.io.js"></script>
+  <script src="https://cdn.socket.io/4.8.1/socket.io.min.js"></script>
 </head>
 <body>
   <div class="app-shell landing-shell">
@@ -72,6 +72,22 @@
         </form>
       </section>
 
+      <section class="landing-card">
+        <h2>Have a VIP Code?</h2>
+        <p class="landing-muted">Enter a VIP code to join a private show as a guest.</p>
+        <form id="vipCodeForm" class="landing-form">
+          <div class="field">
+            <label>VIP Code</label>
+            <input id="vipCodeInput" type="text" placeholder="e.g. 8XFA12" required />
+          </div>
+          <div class="field">
+            <label>Display Name</label>
+            <input id="vipDisplayNameInput" type="text" placeholder="Your name (optional)" />
+          </div>
+          <button class="btn primary full-width" type="submit">Enter with VIP Code</button>
+          <div id="vipCodeStatus" class="status-message"></div>
+        </form>
+      </section>
     </main>
   </div>
 

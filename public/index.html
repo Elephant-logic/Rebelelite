@@ -80,23 +80,26 @@
           </div>
 
           <div class="field" style="margin-top:15px; border-top:1px solid var(--border); padding-top:10px;">
-            <label style="color:var(--accent);">🔒 Room Privacy &amp; VIP Access</label>
+            <label style="color:var(--danger);">⛔ VIP / Private Room</label>
+            <div style="display:flex; align-items:center; gap:10px; margin-bottom:10px;">
+                <span style="font-size:0.75rem; color:var(--muted);">Private Mode:</span>
+                <button id="togglePrivateBtn" class="btn small secondary" style="flex:1">OFF</button>
+            </div>
+            <div id="guestListPanel" style="display:none;">
+                <div style="display:flex; gap:5px;">
+                    <input id="guestNameInput" type="text" placeholder="Name (e.g. Dave)" style="font-size:0.8rem; padding:6px;" />
+                    <button id="addGuestBtn" class="btn small primary">+</button>
+                </div>
+                <div id="guestListDisplay" style="margin-top:5px; max-height:80px; overflow-y:auto; display:flex; flex-wrap:wrap; gap:4px;">
+                </div>
+            </div>
+          </div>
+
+          <div class="field" style="margin-top:15px; border-top:1px solid var(--border); padding-top:10px;">
+            <label style="color:var(--accent);">✨ VIP Access</label>
             <p style="font-size:0.7rem; color:var(--muted); margin-bottom:6px;">
-              Choose one access mode:
+              Grant guest access by username or shareable code.
             </p>
-            <ul style="margin:0 0 10px 18px; padding:0; font-size:0.7rem; color:var(--muted); line-height:1.4;">
-              <li><strong>Public</strong>: Private Room OFF, VIP Required OFF → anyone joins with the room name.</li>
-              <li><strong>Private (VIP list)</strong>: Private Room ON, VIP Required OFF → only VIP usernames can join.</li>
-              <li><strong>Private (VIP code)</strong>: Private Room ON, VIP Required ON → VIP username + valid code required.</li>
-            </ul>
-            <div style="display:flex; align-items:center; gap:10px; margin-bottom:10px;">
-              <span style="font-size:0.75rem; color:var(--muted);">Private Room:</span>
-              <button id="togglePrivateBtn" class="btn small secondary" style="flex:1">OFF</button>
-            </div>
-            <div style="display:flex; align-items:center; gap:10px; margin-bottom:10px;">
-              <span style="font-size:0.75rem; color:var(--muted);">VIP Required (codes):</span>
-              <button id="vipRequiredToggle" class="btn small secondary" style="flex:1">OFF</button>
-            </div>
             <div style="display:flex; gap:5px;">
               <input id="vipUserInput" type="text" placeholder="Add VIP username" style="font-size:0.8rem; padding:6px; flex:1;" />
               <button id="addVipUserBtn" class="btn small primary">Add</button>
@@ -105,83 +108,12 @@
             <div style="display:flex; gap:5px; margin-top:8px;">
               <select id="vipCodeUses" class="select-input" style="flex:1; font-size:0.75rem;">
                 <option value="1" selected>Single Use</option>
-                <option value="-1">Multi Use (reusable)</option>
+                <option value="10">10 Uses</option>
               </select>
               <button id="generateVipCodeBtn" class="btn small secondary" style="flex:1;">Generate VIP Code</button>
             </div>
             <div id="vipCodeList" style="margin-top:6px; max-height:80px; overflow-y:auto; display:flex; flex-wrap:wrap; gap:4px;"></div>
             <div id="vipStatus" style="font-size:0.7rem; color:var(--muted); margin-top:6px; text-align:center;"></div>
-          </div>
-
-          <div class="field" style="margin-top:15px; border-top:1px solid var(--border); padding-top:10px;">
-            <label style="color:var(--accent);">💸 Host Payments</label>
-            <p style="font-size:0.7rem; color:var(--muted); margin-bottom:6px;">
-              Add a support button that opens your payment link.
-            </p>
-            <div class="toggle-row" style="margin-bottom:8px;">
-              <input id="paymentEnableToggle" type="checkbox" />
-              <span>Enable payment button for this room</span>
-            </div>
-            <input
-              id="paymentLabelInput"
-              type="text"
-              placeholder="Tip the host"
-              style="font-size:0.8rem; padding:6px; margin-bottom:6px; width:100%;"
-            />
-            <input
-              id="paymentUrlInput"
-              type="text"
-              placeholder="https://pay.stripe.com/..."
-              style="font-size:0.8rem; padding:6px; margin-bottom:6px; width:100%;"
-            />
-            <button id="paymentSaveBtn" class="btn small secondary full-width">Save</button>
-            <div id="paymentStatus" style="font-size:0.7rem; color:var(--muted); margin-top:6px; text-align:center;"></div>
-          </div>
-
-          <div class="field" style="margin-top:15px; border-top:1px solid var(--border); padding-top:10px;">
-            <label style="color:var(--accent);">🛰️ TURN / Relay</label>
-            <p style="font-size:0.7rem; color:var(--muted); margin-bottom:6px;">
-              Optional relay for mobile-safe mode. Default remains STUN-only.
-            </p>
-            <div class="toggle-row" style="margin-bottom:8px;">
-              <input id="turnEnableToggle" type="checkbox" />
-              <span>Enable relay / mobile-safe mode for this room</span>
-            </div>
-            <details id="turnAdvanced" style="font-size:0.8rem;">
-              <summary style="cursor:pointer; color:var(--muted); margin-bottom:6px;">Advanced</summary>
-              <input
-                id="turnHostInput"
-                type="text"
-                placeholder="TURN host (e.g. turn.example.com)"
-                style="font-size:0.8rem; padding:6px; margin-bottom:6px; width:100%;"
-              />
-              <input
-                id="turnPortInput"
-                type="number"
-                placeholder="TURN port (e.g. 3478)"
-                style="font-size:0.8rem; padding:6px; margin-bottom:6px; width:100%;"
-              />
-              <input
-                id="turnTlsPortInput"
-                type="number"
-                placeholder="TURN TLS port (optional, e.g. 5349)"
-                style="font-size:0.8rem; padding:6px; margin-bottom:6px; width:100%;"
-              />
-              <input
-                id="turnUsernameInput"
-                type="text"
-                placeholder="TURN username"
-                style="font-size:0.8rem; padding:6px; margin-bottom:6px; width:100%;"
-              />
-              <input
-                id="turnPasswordInput"
-                type="password"
-                placeholder="TURN password"
-                style="font-size:0.8rem; padding:6px; margin-bottom:6px; width:100%;"
-              />
-            </details>
-            <button id="turnSaveBtn" class="btn small secondary full-width">Save</button>
-            <div id="turnStatus" style="font-size:0.7rem; color:var(--muted); margin-top:6px; text-align:center;"></div>
           </div>
 
           <button id="lockRoomBtn" class="btn full-width" style="margin-top:15px;">🔓 Lock Room</button>
@@ -333,9 +265,9 @@
     </div>
   </div>
   
-  <script src="/socket.io/socket.io.js"></script>
+  <script src="https://cdn.socket.io/4.8.1/socket.io.min.js"></script>
   <script src="config/ice.js"></script>
-  <script src="dist/app.bundle.js"></script>
+  <script src="app.js"></script>
   <script>
     // AUTO-FILL GUEST LOGIC
     window.addEventListener('load', () => {
