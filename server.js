@@ -1,20 +1,116 @@
 const path = require('path');
+const crypto = require('crypto');
 const express = require('express');
 const http = require('http');
 const { Server } = require('socket.io');
+const bcrypt = require('bcrypt');
+const helmet = require('helmet');
+const rateLimit = require('express-rate-limit');
+
+const BCRYPT_ROUNDS = 12;
+
+// ======================================================
+// DATABASE PERSISTENCE (Optional)
+// ======================================================
+// Set USE_DATABASE=true to enable SQLite persistence
+// Otherwise, in-memory storage is used (data lost on restart)
+const USE_DATABASE = process.env.USE_DATABASE === 'true';
+let dbModule = null;
+
+if (USE_DATABASE) {
+  try {
+    dbModule = require('./db');
+    console.log('[DB] SQLite persistence enabled');
+  } catch (err) {
+    console.warn('[DB] Failed to load database module, falling back to in-memory storage:', err.message);
+  }
+}
 
 const PORT = process.env.PORT || 9100;
 
 const app = express();
 const server = http.createServer(app);
 
+// ======================================================
+// SECURITY MIDDLEWARE
+// ======================================================
+// HTTP Rate Limiting - prevents brute force attacks
+const httpLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000, // 15 minutes
+  max: 100, // limit each IP to 100 requests per windowMs
+  message: { error: 'Too many requests, please try again later.' },
+  standardHeaders: true,
+  legacyHeaders: false,
+});
+app.use(httpLimiter);
+
+// Security headers via helmet
+app.use(helmet({
+  contentSecurityPolicy: {
+    directives: {
+      defaultSrc: ["'self'"],
+      scriptSrc: ["'self'", "'unsafe-inline'", "https://cdnjs.cloudflare.com"],
+      styleSrc: ["'self'", "'unsafe-inline'"],
+      imgSrc: ["'self'", "data:", "blob:"],
+      connectSrc: ["'self'", "ws:", "wss:"],
+      mediaSrc: ["'self'", "blob:"],
+      frameSrc: ["'none'"],
+    },
+  },
+  crossOriginEmbedderPolicy: false, // Allow WebRTC
+}));
+
+// CORS configuration (configurable via environment)
+const ALLOWED_ORIGINS = process.env.ALLOWED_ORIGINS
+  ? process.env.ALLOWED_ORIGINS.split(',')
+  : '*';
+
 // Increased buffer to 50MB for large arcade transfers
 const io = new Server(server, {
-  cors: { origin: '*' },
+  cors: { origin: ALLOWED_ORIGINS },
   maxHttpBufferSize: 5e7,
   pingTimeout: 10000,
   pingInterval: 25000
 });
+
+// ======================================================
+// SOCKET.IO RATE LIMITING
+// ======================================================
+const socketRateLimits = new Map(); // Track per-socket rate limits
+
+function checkSocketRateLimit(socketId, action, limit, windowMs) {
+  const key = `${socketId}:${action}`;
+  const now = Date.now();
+
+  if (!socketRateLimits.has(key)) {
+    socketRateLimits.set(key, { count: 1, windowStart: now });
+    return true;
+  }
+
+  const data = socketRateLimits.get(key);
+  if (now - data.windowStart > windowMs) {
+    // Reset window
+    socketRateLimits.set(key, { count: 1, windowStart: now });
+    return true;
+  }
+
+  if (data.count >= limit) {
+    return false; // Rate limited
+  }
+
+  data.count++;
+  return true;
+}
+
+// Clean up old rate limit entries periodically
+setInterval(() => {
+  const now = Date.now();
+  for (const [key, data] of socketRateLimits.entries()) {
+    if (now - data.windowStart > 60000) { // Clean entries older than 1 minute
+      socketRateLimits.delete(key);
+    }
+  }
+}, 60000);
 
 app.get('/', (req, res) => {
   res.sendFile(path.join(__dirname, 'public', 'landing.html'));
@@ -37,12 +133,25 @@ const roomDirectory = {
 
 function normalizeRoomName(roomName) {
   if (!roomName || typeof roomName !== 'string') return '';
-  return roomName.trim().slice(0, 50);
+  // Allow alphanumeric, dashes, and underscores only
+  const sanitized = roomName.trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9\-_]/g, '-')  // Replace invalid chars with dashes
+    .replace(/-+/g, '-')             // Collapse multiple dashes
+    .replace(/^-|-$/g, '');          // Remove leading/trailing dashes
+  return sanitized.slice(0, 50);
+}
+
+function isValidRoomName(roomName) {
+  if (!roomName || typeof roomName !== 'string') return false;
+  // Must be 1-50 chars, alphanumeric with dashes/underscores
+  return /^[a-z0-9][a-z0-9\-_]{0,49}$/i.test(roomName.trim());
 }
 
 function normalizeVipCode(value) {
   if (!value || typeof value !== 'string') return '';
-  return value.trim().toUpperCase();
+  // Only allow alphanumeric
+  return value.trim().toUpperCase().replace(/[^A-Z0-9]/g, '').slice(0, 20);
 }
 
 function buildRoomRecord({ roomName, ownerPassword, privacy }) {
@@ -74,12 +183,20 @@ function buildRoomRecord({ roomName, ownerPassword, privacy }) {
 function getRoomRecord(roomName) {
   const name = normalizeRoomName(roomName);
   if (!name) return null;
+  // Use database if available
+  if (dbModule) {
+    return dbModule.getRoomRecord(name);
+  }
   return roomDirectory.rooms[name] || null;
 }
 
 function createRoomRecord({ roomName, ownerPassword, privacy }) {
   const name = normalizeRoomName(roomName);
   if (!name) return { ok: false, error: 'Invalid room name.' };
+  // Use database if available
+  if (dbModule) {
+    return dbModule.createRoomRecord({ roomName: name, ownerPassword, privacy });
+  }
   if (roomDirectory.rooms[name]) return { ok: false, error: 'Room already exists.' };
   const record = buildRoomRecord({ roomName: name, ownerPassword, privacy });
   roomDirectory.rooms[name] = record;
@@ -89,6 +206,10 @@ function createRoomRecord({ roomName, ownerPassword, privacy }) {
 function updateRoomRecord(roomName, updater) {
   const name = normalizeRoomName(roomName);
   if (!name) return { ok: false, error: 'Invalid room name.' };
+  // Use database if available
+  if (dbModule) {
+    return dbModule.updateRoomRecord(name, updater);
+  }
   const existing = roomDirectory.rooms[name];
   if (!existing) return { ok: false, error: 'Room not found.' };
   updater(existing);
@@ -96,6 +217,10 @@ function updateRoomRecord(roomName, updater) {
 }
 
 function listPublicRooms() {
+  // Use database if available
+  if (dbModule) {
+    return dbModule.listPublicRooms();
+  }
   return Object.values(roomDirectory.rooms)
     .filter((room) => room.privacy === 'public' && room.isLive)
     .map((room) => ({
@@ -146,7 +271,9 @@ function isRoomClaimed(roomName) {
 }
 
 function issueVipToken(roomName) {
-  const token = `${roomName}-${Math.random().toString(36).slice(2, 10)}-${Date.now()}`;
+  // Use cryptographically secure random bytes instead of Math.random()
+  const randomPart = crypto.randomBytes(16).toString('hex');
+  const token = `${randomPart}-${Date.now()}`;
   vipTokens.set(token, { roomName, created: Date.now() });
   return token;
 }
@@ -185,18 +312,21 @@ function buildUserList(room) {
   return users;
 }
 
-function generateVipCode(length = 6) {
+function generateVipCode(length = 8) {
+  // Use cryptographically secure random bytes instead of Math.random()
   const chars = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
+  const randomBytes = crypto.randomBytes(length);
   let output = '';
   for (let i = 0; i < length; i += 1) {
-    output += chars.charAt(Math.floor(Math.random() * chars.length));
+    output += chars.charAt(randomBytes[i] % chars.length);
   }
   return output;
 }
 
 function normalizePaymentLabel(value) {
   if (!value || typeof value !== 'string') return '';
-  return value.trim().slice(0, 80);
+  // Remove any HTML-like content from labels
+  return value.trim().replace(/<[^>]*>/g, '').slice(0, 80);
 }
 
 function normalizePaymentUrl(value) {
@@ -205,7 +335,29 @@ function normalizePaymentUrl(value) {
 }
 
 function isValidPaymentUrl(value) {
-  return typeof value === 'string' && (value.startsWith('http://') || value.startsWith('https://'));
+  if (typeof value !== 'string') return false;
+  // In production, prefer HTTPS only
+  const isProduction = process.env.NODE_ENV === 'production';
+  if (isProduction) {
+    return value.startsWith('https://');
+  }
+  return value.startsWith('http://') || value.startsWith('https://');
+}
+
+// Allowed file types for arcade/file sharing
+const ALLOWED_FILE_TYPES = new Set([
+  'text/html', 'text/plain', 'text/css', 'text/javascript',
+  'application/javascript', 'application/json',
+  'image/png', 'image/jpeg', 'image/gif', 'image/webp', 'image/svg+xml',
+  'audio/mpeg', 'audio/wav', 'audio/ogg', 'audio/webm',
+  'video/mp4', 'video/webm', 'video/ogg',
+  'application/pdf', 'application/zip',
+  'application/octet-stream' // Generic binary
+]);
+
+function isAllowedFileType(mimeType) {
+  if (!mimeType || typeof mimeType !== 'string') return true; // Allow if not specified
+  return ALLOWED_FILE_TYPES.has(mimeType.toLowerCase().split(';')[0].trim());
 }
 
 function normalizeTurnConfig(config = {}) {
@@ -248,6 +400,52 @@ function sanitizeTurnConfig(config) {
   return normalized;
 }
 
+// ======================================================
+// PASSWORD HASHING HELPERS
+// ======================================================
+async function hashPassword(plaintext) {
+  if (!plaintext) return null;
+  return bcrypt.hash(plaintext, BCRYPT_ROUNDS);
+}
+
+async function verifyPassword(plaintext, storedHash) {
+  if (!plaintext || !storedHash) return false;
+  // Check if stored password is a bcrypt hash (starts with $2)
+  if (storedHash.startsWith('$2')) {
+    return bcrypt.compare(plaintext, storedHash);
+  }
+  // Legacy plaintext comparison (for migration)
+  return plaintext === storedHash;
+}
+
+// Check if password needs migration to bcrypt
+function isLegacyPassword(storedHash) {
+  if (!storedHash) return false;
+  return !storedHash.startsWith('$2');
+}
+
+// Migrate plaintext password to bcrypt hash
+async function migratePassword(roomName, plaintext) {
+  const hashed = await hashPassword(plaintext);
+  updateRoomRecord(roomName, (room) => {
+    room.ownerPassword = hashed;
+  });
+  return hashed;
+}
+
+// ======================================================
+// HTML SANITIZATION HELPER
+// ======================================================
+function escapeHtml(text) {
+  if (!text || typeof text !== 'string') return '';
+  return text
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#039;');
+}
+
 function broadcastRoomUpdate(roomName) {
   const room = rooms[roomName];
   if (!room) return;
@@ -280,8 +478,13 @@ io.on('connection', (socket) => {
     socket.emit('public-rooms', listPublicRooms());
   });
 
-  socket.on('claim-room', ({ name, password, privacy } = {}, callback) => {
+  socket.on('claim-room', async ({ name, password, privacy } = {}, callback) => {
     const reply = typeof callback === 'function' ? callback : () => {};
+    // Rate limit: 5 auth attempts per minute
+    if (!checkSocketRateLimit(socket.id, 'auth', 5, 60000)) {
+      reply({ ok: false, error: 'Too many attempts. Please wait before trying again.' });
+      return;
+    }
     const roomName = normalizeRoomName(name);
     if (!roomName || !password) {
       reply({ ok: false, error: 'Room name and password are required.' });
@@ -289,30 +492,39 @@ io.on('connection', (socket) => {
     }
     const record = getRoomRecord(roomName);
     if (!record) {
+      // Hash password before storing
+      const hashedPassword = await hashPassword(password);
       const result = createRoomRecord({
         roomName,
-        ownerPassword: password,
+        ownerPassword: hashedPassword,
         privacy
       });
       reply(result.ok ? { ok: true } : { ok: false, error: result.error });
       return;
     }
     if (record.ownerPassword) {
-      if (record.ownerPassword !== String(password || '')) {
+      const valid = await verifyPassword(password, record.ownerPassword);
+      if (!valid) {
         reply({ ok: false, error: 'Invalid room password.' });
         return;
+      }
+      // Migrate legacy plaintext password to bcrypt
+      if (isLegacyPassword(record.ownerPassword)) {
+        await migratePassword(roomName, password);
       }
       reply({ ok: true });
       return;
     }
+    // Room exists but has no password - set one now
+    const hashedPassword = await hashPassword(password);
     updateRoomRecord(roomName, (room) => {
-      room.ownerPassword = String(password);
+      room.ownerPassword = hashedPassword;
       room.privacy = privacy === 'private' ? 'private' : 'public';
     });
     reply({ ok: true });
   });
 
-  socket.on('enter-host-room', ({ roomName, password, privacy } = {}, callback) => {
+  socket.on('enter-host-room', async ({ roomName, password, privacy } = {}, callback) => {
     const reply = typeof callback === 'function' ? callback : () => {};
     const normalizedName = normalizeRoomName(roomName);
     if (!normalizedName) {
@@ -321,9 +533,11 @@ io.on('connection', (socket) => {
     }
     const record = getRoomRecord(normalizedName);
     if (!record) {
+      // Hash password before storing
+      const hashedPassword = password ? await hashPassword(password) : null;
       const result = createRoomRecord({
         roomName: normalizedName,
-        ownerPassword: password || null,
+        ownerPassword: hashedPassword,
         privacy: privacy === 'private' ? 'private' : 'public'
       });
       if (result.ok && password) {
@@ -334,9 +548,14 @@ io.on('connection', (socket) => {
       return;
     }
     if (record.ownerPassword) {
-      if (record.ownerPassword !== String(password || '')) {
+      const valid = await verifyPassword(password, record.ownerPassword);
+      if (!valid) {
         reply({ ok: false, error: 'Invalid room password.' });
         return;
+      }
+      // Migrate legacy plaintext password to bcrypt
+      if (isLegacyPassword(record.ownerPassword)) {
+        await migratePassword(normalizedName, password);
       }
       if (!socket.data.hostAuthRooms) socket.data.hostAuthRooms = new Set();
       socket.data.hostAuthRooms.add(normalizedName);
@@ -386,42 +605,67 @@ io.on('connection', (socket) => {
     reply({ claimed, hasPassword });
   });
 
-  socket.on('auth-host-room', ({ name, roomName, password } = {}, callback) => {
+  socket.on('auth-host-room', async ({ name, roomName, password } = {}, callback) => {
     const reply = typeof callback === 'function' ? callback : () => {};
+    // Rate limit: 5 auth attempts per minute
+    if (!checkSocketRateLimit(socket.id, 'auth', 5, 60000)) {
+      reply({ ok: false, error: 'Too many attempts. Please wait before trying again.' });
+      return;
+    }
     const targetName = roomName || name;
     const record = getRoomRecord(targetName);
     if (!record) {
       reply({ ok: false, error: 'Room not found.' });
       return;
     }
-    if (record.ownerPassword !== String(password || '')) {
+    const valid = await verifyPassword(password, record.ownerPassword);
+    if (!valid) {
       reply({ ok: false, error: 'Invalid room password.' });
       return;
+    }
+    // Migrate legacy plaintext password to bcrypt
+    if (isLegacyPassword(record.ownerPassword)) {
+      await migratePassword(record.roomName, password);
     }
     if (!socket.data.hostAuthRooms) socket.data.hostAuthRooms = new Set();
     socket.data.hostAuthRooms.add(record.roomName);
     reply({ ok: true });
   });
 
-  socket.on('host-login', ({ name, password } = {}, callback) => {
+  socket.on('host-login', async ({ name, password } = {}, callback) => {
     const reply = typeof callback === 'function' ? callback : () => {};
+    // Rate limit: 5 auth attempts per minute
+    if (!checkSocketRateLimit(socket.id, 'auth', 5, 60000)) {
+      reply({ ok: false, error: 'Too many attempts. Please wait before trying again.' });
+      return;
+    }
     const record = getRoomRecord(name);
     if (!record) {
       reply({ ok: false, error: 'Room not found.' });
       return;
     }
-    if (record.ownerPassword !== String(password || '')) {
+    const valid = await verifyPassword(password, record.ownerPassword);
+    if (!valid) {
       reply({ ok: false, error: 'Invalid room password.' });
       return;
+    }
+    // Migrate legacy plaintext password to bcrypt
+    if (isLegacyPassword(record.ownerPassword)) {
+      await migratePassword(name, password);
     }
     reply({ ok: true });
   });
 
   socket.on('update-room-privacy', ({ roomName, privacy, name } = {}, callback) => {
     const reply = typeof callback === 'function' ? callback : () => {};
-    const targetName = roomName || name;
+    const targetName = normalizeRoomName(roomName || name);
     if (!targetName || !privacy) {
       reply({ ok: false, error: 'Room name and privacy are required.' });
+      return;
+    }
+    const info = getRoomInfo(targetName);
+    if (!requireOwner(info, socket)) {
+      reply({ ok: false, error: 'Only the host can update room privacy.' });
       return;
     }
     const normalizedPrivacy = privacy === 'private' ? 'private' : 'public';
@@ -456,9 +700,14 @@ io.on('connection', (socket) => {
 
   socket.on('update-room-live', ({ roomName, name, isLive, live, viewers, title } = {}, callback) => {
     const reply = typeof callback === 'function' ? callback : () => {};
-    const targetName = roomName || name;
+    const targetName = normalizeRoomName(roomName || name);
     if (!targetName) {
       reply({ ok: false, error: 'Room name is required.' });
+      return;
+    }
+    const info = getRoomInfo(targetName);
+    if (!requireOwner(info, socket)) {
+      reply({ ok: false, error: 'Only the host can update room status.' });
       return;
     }
     const result = updateRoomRecord(targetName, (room) => {
@@ -565,6 +814,11 @@ io.on('connection', (socket) => {
 
   socket.on('generate-vip-code', ({ room, maxUses } = {}, callback) => {
     const reply = typeof callback === 'function' ? callback : () => {};
+    // Rate limit: 10 VIP code generations per minute
+    if (!checkSocketRateLimit(socket.id, 'vip-gen', 10, 60000)) {
+      reply({ ok: false, error: 'Too many code generations. Please wait.' });
+      return;
+    }
     const roomName = normalizeRoomName(room);
     if (!roomName) {
       reply({ ok: false, error: 'Room is required.' });
@@ -575,7 +829,7 @@ io.on('connection', (socket) => {
       reply({ ok: false, error: 'Only the host can generate VIP codes.' });
       return;
     }
-    const code = generateVipCode(6);
+    const code = generateVipCode(8); // Now 8 characters for better security
     const normalizedMaxUses = Number.isFinite(maxUses) ? Math.max(1, Math.floor(maxUses)) : 1;
     const result = updateRoomRecord(roomName, (storedRoom) => {
       storedRoom.vipCodes[code] = { maxUses: normalizedMaxUses, usesLeft: normalizedMaxUses };
@@ -943,15 +1197,20 @@ io.on('connection', (socket) => {
   });
 
   // ======================================================
-  // CHAT + FILE EVENTS
+  // CHAT + FILE EVENTS (with rate limiting)
   // ======================================================
   socket.on('public-chat', ({ room, name, text, fromViewer }) => {
+    // Rate limit: 30 messages per minute
+    if (!checkSocketRateLimit(socket.id, 'chat', 30, 60000)) {
+      socket.emit('rate-limited', { action: 'chat', message: 'Too many messages. Please slow down.' });
+      return;
+    }
     const roomName = room || socket.data.room;
     if (!roomName || !text) return;
     const info = rooms[roomName];
     io.to(roomName).emit('public-chat', {
-      name: (name || socket.data.name || 'Anon').slice(0, 30),
-      text: String(text).slice(0, 500),
+      name: escapeHtml((name || socket.data.name || 'Anon').slice(0, 30)),
+      text: escapeHtml(String(text).slice(0, 500)),
       ts: Date.now(),
       isOwner: info && info.ownerId === socket.id,
       fromViewer: !!fromViewer
@@ -959,22 +1218,38 @@ io.on('connection', (socket) => {
   });
 
   socket.on('private-chat', ({ room, name, text }) => {
+    // Rate limit: 30 messages per minute
+    if (!checkSocketRateLimit(socket.id, 'chat', 30, 60000)) {
+      socket.emit('rate-limited', { action: 'chat', message: 'Too many messages. Please slow down.' });
+      return;
+    }
     const roomName = room || socket.data.room;
     if (!roomName || !text) return;
     io.to(roomName).emit('private-chat', {
-      name: (name || socket.data.name || 'Anon').slice(0, 30),
-      text: String(text).slice(0, 500),
+      name: escapeHtml((name || socket.data.name || 'Anon').slice(0, 30)),
+      text: escapeHtml(String(text).slice(0, 500)),
       ts: Date.now()
     });
   });
 
   socket.on('file-share', ({ room, name, fileName, fileType, fileData }) => {
+    // Rate limit: 5 file shares per minute
+    if (!checkSocketRateLimit(socket.id, 'file', 5, 60000)) {
+      socket.emit('rate-limited', { action: 'file', message: 'Too many file uploads. Please wait.' });
+      return;
+    }
     const roomName = room || socket.data.room;
     if (!roomName || !fileName || !fileData) return;
+    // Validate file type
+    const sanitizedFileType = fileType || 'application/octet-stream';
+    if (!isAllowedFileType(sanitizedFileType)) {
+      socket.emit('file-rejected', { reason: 'File type not allowed.' });
+      return;
+    }
     io.to(roomName).emit('file-share', {
-      name: (name || socket.data.name).slice(0, 30),
-      fileName: String(fileName).slice(0, 100),
-      fileType: fileType || 'application/octet-stream',
+      name: escapeHtml((name || socket.data.name).slice(0, 30)),
+      fileName: escapeHtml(String(fileName).slice(0, 100)),
+      fileType: sanitizedFileType,
       fileData
     });
   });
