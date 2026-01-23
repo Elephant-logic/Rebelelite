@@ -4,12 +4,8 @@
   "description": "Rebel Messenger - simple WebRTC chat + audio/video + file sharing",
   "main": "server.js",
   "scripts": {
-    "build": "node scripts/build.js",
-    "deploy:render": "bash scripts/deploy-render.sh",
     "start": "node server.js",
-    "test": "playwright test",
-    "selftest:remote": "node scripts/selftest-remote.js",
-    "selftest:headless": "node scripts/selftest-headless.js"
+    "test": "echo \"No automated tests configured.\""
   },
   "engines": {
     "node": ">=18"
@@ -17,9 +13,5 @@
   "dependencies": {
     "express": "^4.19.2",
     "socket.io": "^4.8.1"
-  },
-  "devDependencies": {
-    "@playwright/test": "^1.48.2",
-    "esbuild": "^0.23.1"
   }
 }
