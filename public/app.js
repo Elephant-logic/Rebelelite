@@ -613,6 +613,7 @@ function getOverlayFieldType(el) {
   const tag = el.tagName.toLowerCase();
   if (tag === 'img') return 'image';
   if (tag === 'video') return 'video';
+  if (tag === 'iframe') return 'video';
   if (tag === 'source' && el.parentElement?.tagName?.toLowerCase() === 'video') {
     return 'video';
   }
@@ -1068,6 +1069,10 @@ function applyOverlayFieldValues(container) {
       }
 
       if (field.type === 'video') {
+        if (el.tagName.toLowerCase() === 'iframe') {
+          el.setAttribute('src', value);
+          return;
+        }
         if (el.tagName.toLowerCase() === 'source') {
           el.setAttribute('src', value);
           const video = el.parentElement;
