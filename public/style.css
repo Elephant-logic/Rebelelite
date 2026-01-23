@@ -79,15 +79,6 @@ textarea:focus { border-color: var(--accent); box-shadow: 0 0 0 2px rgba(74,243,
   font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
 }
 
-.overlay-field-header {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  font-size: 0.75rem;
-  color: var(--muted);
-  padding: 2px 4px;
-}
-
 .overlay-map {
   background: var(--panel-soft);
   border: 1px solid var(--border);
@@ -129,29 +120,6 @@ textarea:focus { border-color: var(--accent); box-shadow: 0 0 0 2px rgba(74,243,
   background: rgba(0, 0, 0, 0.15);
 }
 
-.overlay-map-controls {
-  display: grid;
-  grid-template-columns: 1fr;
-  gap: 6px;
-}
-
-.overlay-map-select,
-.overlay-map-custom,
-.overlay-map-name,
-.overlay-map-group {
-  width: 100%;
-  background: var(--panel);
-  border: 1px solid var(--border);
-  color: #fff;
-  padding: 8px;
-  border-radius: var(--radius-sm);
-  font-size: 0.85rem;
-}
-
-.overlay-map-custom {
-  display: none;
-}
-
 .overlay-map-target {
   font-size: 0.7rem;
   color: var(--muted);
@@ -161,12 +129,6 @@ textarea:focus { border-color: var(--accent); box-shadow: 0 0 0 2px rgba(74,243,
   display: flex;
   gap: 8px;
   justify-content: flex-end;
-}
-
-.overlay-map-status {
-  font-size: 0.7rem;
-  color: var(--accent);
-  text-align: right;
 }
 
 /* Buttons */
