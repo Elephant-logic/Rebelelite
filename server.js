@@ -811,8 +811,8 @@ io.on('connection', (socket) => {
     }
 
     // VIP access rules:
-    // - VIP username list controls private access.
-    // - VIP codes are only required when VIP Required is enabled.
+    // - Private rooms allow any named viewer.
+    // - When VIP Required is enabled, viewers must be on the VIP list and provide a valid code.
     const vipRooms = socket.data.vipRooms;
 
     const privacy = directoryEntry ? directoryEntry.privacy : 'public';
@@ -822,7 +822,7 @@ io.on('connection', (socket) => {
 
     const vipByName =
       viewerMode &&
-      isPrivate &&
+      vipGate &&
       Array.isArray(directoryEntry?.vipUsers) &&
       directoryEntry.vipUsers.some(
         (user) => String(user).trim().toLowerCase() === displayName.toLowerCase()
@@ -867,9 +867,9 @@ io.on('connection', (socket) => {
     const hasVipToken =
       vipGate && vipByName && (vipTokenAccepted || (vipRooms && vipRooms.has(roomName)));
 
-    const isVip = viewerMode && isPrivate && vipByName && (!vipGate || vipByCode || hasVipToken);
+    const isVip = viewerMode && vipGate && vipByName && (vipByCode || hasVipToken);
 
-    if (viewerMode && isPrivate && !vipByName) {
+    if (viewerMode && vipGate && !vipByName) {
       reply({ ok: false, error: 'VIP username required.' });
       return;
     }

@@ -620,8 +620,8 @@ async function testPrivateVipLogic() {
     roomName: context.roomName,
     name: 'PrivateViewer'
   });
-  if (privateJoin?.ok) {
-    throw new Error('Private room allowed viewer without VIP username');
+  if (!privateJoin?.ok) {
+    throw new Error(privateJoin?.error || 'Private room blocked viewer with a name');
   }
 
   const vipInput = doc.getElementById('vipUserInput');
@@ -634,21 +634,21 @@ async function testPrivateVipLogic() {
   vipInput.dispatchEvent(new Event('input', { bubbles: true }));
   addVipBtn.click();
 
-  const vipNameJoin = await joinViewerSocket({
-    roomName: context.roomName,
-    name: 'ListVip'
-  });
-  if (!vipNameJoin?.ok || !vipNameJoin?.isVip) {
-    throw new Error(vipNameJoin?.error || 'VIP username did not grant access');
-  }
-
   await setRoomPrivacyAndVip({ privacy: 'private', vipRequired: true });
 
   const blockedJoin = await joinViewerSocket({
     roomName: context.roomName,
-    name: 'ListVip'
+    name: 'NotVip'
   });
   if (blockedJoin?.ok) {
+    throw new Error('VIP-required room allowed viewer not on VIP list');
+  }
+
+  const vipNameJoin = await joinViewerSocket({
+    roomName: context.roomName,
+    name: 'ListVip'
+  });
+  if (vipNameJoin?.ok) {
     throw new Error('Private room allowed VIP username without code');
   }
 
@@ -659,6 +659,22 @@ async function testPrivateVipLogic() {
   });
   if (invalidCodeJoin?.ok) {
     throw new Error('Private room allowed invalid VIP code');
+  }
+
+  const codeResp = await emitWithAck(context.hostSocket, 'generate-vip-code', {
+    room: context.roomName,
+    maxUses: 1
+  });
+  if (!codeResp?.ok || !codeResp?.code) {
+    throw new Error('VIP code generation failed for private/VIP test');
+  }
+  const validJoin = await joinViewerSocket({
+    roomName: context.roomName,
+    name: 'ListVip',
+    vipCode: codeResp.code
+  });
+  if (!validJoin?.ok || !validJoin?.isVip) {
+    throw new Error(validJoin?.error || 'VIP room blocked valid VIP code');
   }
 
   return 'Private/VIP rules enforced for public, private, and VIP-required states.';
@@ -983,8 +999,8 @@ async function testPrivateViewerBlocked() {
     isViewer: true
   });
   openSocket.disconnect();
-  if (joinResp?.ok) throw new Error('Private room allowed viewer without VIP username');
-  return 'Private room blocked non-VIP viewer when VIP list is required.';
+  if (!joinResp?.ok) throw new Error('Private room blocked viewer with a name');
+  return 'Private room allowed viewer with only a name.';
 }
 
 async function testPrivateVipRequiredBlocked() {

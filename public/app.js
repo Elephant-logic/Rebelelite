@@ -128,6 +128,7 @@ const state = {
   overlayRenderCount: 0,
   overlayMappingPending: false,
   overlayMappingCandidates: [],
+  overlayLastCandidates: [],
   pendingOverlayHTML: '',
   vipUsers: [],
   vipCodes: [],
@@ -584,19 +585,10 @@ function getOverlayFieldAttribute(el) {
   if (!el || !el.getAttribute) return '';
   const dataOverlay = el.getAttribute('data-overlay');
   if (dataOverlay && dataOverlay.trim()) return dataOverlay.trim();
+  const dataOverlayField = el.getAttribute('data-overlay-field');
+  if (dataOverlayField && dataOverlayField.trim()) return dataOverlayField.trim();
   const dataField = el.getAttribute('data-field');
   if (dataField && dataField.trim()) return dataField.trim();
-  const dataOverlayField = el.getAttribute('data-overlay-field');
-  if (dataOverlayField && dataOverlayField.trim()) return dataOverlayField.trim();
-  return '';
-}
-
-function getOverlayFieldAttribute(el) {
-  if (!el || !el.getAttribute) return '';
-  const dataOverlay = el.getAttribute('data-overlay');
-  if (dataOverlay && dataOverlay.trim()) return dataOverlay.trim();
-  const dataOverlayField = el.getAttribute('data-overlay-field');
-  if (dataOverlayField && dataOverlayField.trim()) return dataOverlayField.trim();
   return '';
 }
 
@@ -605,7 +597,17 @@ function getOverlayFieldName(el) {
   const dataName = getOverlayFieldAttribute(el);
   if (dataName) return dataName;
   const id = el.getAttribute('id');
-  if (id && id.trim()) return id.trim();
+  if (id && id.trim()) {
+    const matched = KNOWN_OVERLAY_FIELDS.find(
+      (field) => field.toLowerCase() === id.trim().toLowerCase()
+    );
+    if (matched) return id.trim();
+  }
+  const classList = Array.from(el.classList || []);
+  const matchClass = classList.find((cls) =>
+    KNOWN_OVERLAY_FIELDS.some((field) => field.toLowerCase() === cls.toLowerCase())
+  );
+  if (matchClass) return matchClass;
   return '';
 }
 
@@ -647,6 +649,9 @@ function resolveOverlaySelector(el, fieldName) {
     if (el.hasAttribute('data-overlay-field')) {
       return `[data-overlay-field="${escapeOverlaySelector(fieldName)}"]`;
     }
+    if (el.hasAttribute('data-field')) {
+      return `[data-field="${escapeOverlaySelector(fieldName)}"]`;
+    }
   }
   if (el?.id && el.id.trim()) {
     return `#${escapeOverlaySelector(el.id.trim())}`;
@@ -675,6 +680,12 @@ function buildOverlayCandidateSelector(el) {
     const dataAttr = el.getAttribute('data-overlay-field');
     if (dataAttr && dataAttr.trim()) {
       return `[data-overlay-field="${escapeOverlaySelector(dataAttr.trim())}"]`;
+    }
+  }
+  if (el.hasAttribute('data-field')) {
+    const dataAttr = el.getAttribute('data-field');
+    if (dataAttr && dataAttr.trim()) {
+      return `[data-field="${escapeOverlaySelector(dataAttr.trim())}"]`;
     }
   }
 
@@ -836,6 +847,7 @@ function applyOverlayMapping() {
 
   state.overlayMappingPending = false;
   state.overlayMappingCandidates = [];
+  state.overlayLastCandidates = candidates;
   const pendingHTML = state.pendingOverlayHTML;
   state.pendingOverlayHTML = '';
 
@@ -852,6 +864,7 @@ function applyOverlayMapping() {
 function clearOverlayMapping() {
   state.overlayMappingPending = false;
   state.overlayMappingCandidates = [];
+  state.overlayLastCandidates = [];
   state.pendingOverlayHTML = '';
   if (dom.overlayFields) dom.overlayFields.innerHTML = '';
   if (dom.overlayStatus) dom.overlayStatus.textContent = '[Mapping Cancelled]';
@@ -861,99 +874,52 @@ function detectOverlayFields(doc) {
   const fields = [];
   const used = new Set();
 
-  doc.querySelectorAll('[data-overlay], [data-overlay-field]').forEach((el) => {
+  doc.querySelectorAll('[data-overlay], [data-overlay-field], [data-field]').forEach((el) => {
     const name = getOverlayFieldName(el);
     if (!name || used.has(name)) return;
     used.add(name);
     const type = getOverlayFieldType(el);
-    const selectorValue = buildOverlayCandidateSelector(el);
+    const selectorValue = resolveOverlaySelector(el, name) || buildOverlayCandidateSelector(el);
     if (!selectorValue) return;
     const initialValue =
       type === 'text'
         ? (el.textContent || '').trim()
         : (el.getAttribute('src') || '').trim();
-    const suggestedName = getCandidateSuggestedName(el);
-    const suggestionSource =
-      suggestedName || el.getAttribute('class') || el.getAttribute('id') || '';
-    const suggestedType = detectSuggestedFieldType(suggestionSource);
-    candidates.push({
-      id: `candidate-${candidates.length}`,
+    fields.push({
+      name,
       type,
       selector: selectorValue,
       initialValue,
-      summary: getOverlayCandidateSummary(el),
-      suggestedName,
-      suggestedType,
-      source
+      label: name
     });
-  };
-
-  orderedSelectors.forEach(({ selector, source }) => {
-    doc.querySelectorAll(selector).forEach((el) => pushCandidate(el, source));
   });
-  return candidates;
-}
 
-  const findKnownElement = (fieldName) => {
-    const escapedName = escapeOverlaySelector(fieldName);
-    const dataMatch =
-      doc.querySelector(`[data-overlay="${escapedName}"]`) ||
-      doc.querySelector(`[data-overlay-field="${escapedName}"]`);
-    if (dataMatch) return dataMatch;
-    const directMatch = doc.getElementById(fieldName) || doc.querySelector(`.${escapedName}`);
-    if (directMatch) return directMatch;
-    const lowerName = fieldName.toLowerCase();
-    return Array.from(doc.querySelectorAll('[id], [class]')).find((candidate) => {
-      if (candidate.id && candidate.id.toLowerCase() === lowerName) return true;
-      return Array.from(candidate.classList || []).some(
-        (cls) => cls.toLowerCase() === lowerName
-      );
-    });
-
-    const nameInput = document.createElement('input');
-    nameInput.type = 'text';
-    nameInput.className = 'overlay-map-name';
-    nameInput.placeholder = 'Field name';
-    nameInput.dataset.candidateId = candidate.id;
-
-    const customInput = document.createElement('input');
-    customInput.type = 'text';
-    customInput.className = 'overlay-map-custom';
-    customInput.placeholder = 'Custom field name';
-    customInput.dataset.candidateId = candidate.id;
-
-    if (candidate.suggestedType) {
-      select.value = candidate.suggestedType;
-    } else if (candidate.suggestedName) {
-      select.value = 'text';
+  if (!fields.length) {
+    const knownSelectors = KNOWN_OVERLAY_FIELDS.map(
+      (field) => `#${escapeOverlaySelector(field)}, .${escapeOverlaySelector(field)}`
+    ).join(', ');
+    if (knownSelectors) {
+      doc.querySelectorAll(knownSelectors).forEach((el) => {
+        const name = getOverlayFieldName(el);
+        if (!name || used.has(name)) return;
+        used.add(name);
+        const type = getOverlayFieldType(el);
+        const selectorValue = resolveOverlaySelector(el, name) || buildOverlayCandidateSelector(el);
+        if (!selectorValue) return;
+        const initialValue =
+          type === 'text'
+            ? (el.textContent || '').trim()
+            : (el.getAttribute('src') || '').trim();
+        fields.push({
+          name,
+          type,
+          selector: selectorValue,
+          initialValue,
+          label: name
+        });
+      });
     }
-
-    nameInput.value = candidate.suggestedName || candidate.suggestedType || '';
-
-    const refreshCustomVisibility = () => {
-      const isCustom = select.value === 'custom';
-      customInput.style.display = isCustom ? 'block' : 'none';
-      nameInput.style.display = isCustom ? 'none' : 'block';
-    };
-    select.addEventListener('change', refreshCustomVisibility);
-    refreshCustomVisibility();
-
-    controls.appendChild(select);
-    controls.appendChild(nameInput);
-    controls.appendChild(customInput);
-
-    const groupInput = document.createElement('input');
-    groupInput.type = 'text';
-    groupInput.className = 'overlay-map-group';
-    groupInput.placeholder = 'Group (optional)';
-    groupInput.dataset.candidateId = candidate.id;
-
-    controls.appendChild(groupInput);
-    row.appendChild(controls);
-
-    list.appendChild(row);
-  });
-
+  }
   return fields;
 }
 
@@ -967,6 +933,7 @@ function buildOverlayFieldsFromHTML(htmlString) {
     if (candidates.length) {
       state.overlayMappingPending = true;
       state.overlayMappingCandidates = candidates;
+      state.overlayLastCandidates = candidates;
       state.pendingOverlayHTML = htmlString;
       renderOverlayMappingControls(candidates);
       if (dom.overlayStatus) dom.overlayStatus.textContent = '[Mapping Required]';
@@ -976,60 +943,25 @@ function buildOverlayFieldsFromHTML(htmlString) {
 
   state.overlayMappingPending = false;
   state.overlayMappingCandidates = [];
+  state.overlayLastCandidates = [];
   state.pendingOverlayHTML = '';
   state.overlayFields = fields;
   state.overlayFieldValues = {};
-  mappings.forEach((field) => {
+  fields.forEach((field) => {
     state.overlayFieldValues[field.name] = field.initialValue;
   });
   renderOverlayFieldControls();
-  renderHTMLLayout(pendingHTML);
-  if (dom.overlayStatus) dom.overlayStatus.textContent = '[Mapping Active]';
-}
-
-function clearOverlayMapping() {
-  state.overlayMappingPending = false;
-  state.overlayMappingCandidates = [];
-  state.overlayMappingActive = false;
-  state.overlayLastCandidates = [];
-  state.pendingOverlayHTML = '';
-  if (dom.overlayFields) dom.overlayFields.innerHTML = '';
-  if (dom.overlayStatus) dom.overlayStatus.textContent = '[Mapping Cancelled]';
+  renderHTMLLayout(htmlString);
+  if (dom.overlayStatus) dom.overlayStatus.textContent = '[Loaded]';
 }
 
 function reopenOverlayMapping() {
-  if (!state.overlayLastCandidates.length || !state.pendingOverlayHTML) return;
+  if (!state.overlayLastCandidates.length || !state.currentRawHTML) return;
   state.overlayMappingPending = true;
   state.overlayMappingCandidates = state.overlayLastCandidates;
-  state.overlayMappingActive = false;
+  state.pendingOverlayHTML = state.currentRawHTML;
   renderOverlayMappingControls(state.overlayLastCandidates);
   if (dom.overlayStatus) dom.overlayStatus.textContent = '[Mapping Required]';
-}
-
-function buildOverlayFieldsFromHTML(htmlString) {
-  const parser = new DOMParser();
-  const doc = parser.parseFromString(htmlString, 'text/html');
-  const candidates = collectOverlayMappingCandidates(doc);
-
-  if (candidates.length) {
-    state.overlayMappingPending = true;
-    state.overlayMappingCandidates = candidates;
-    state.overlayLastCandidates = candidates;
-    state.pendingOverlayHTML = htmlString;
-    state.overlayMappingActive = false;
-    renderOverlayMappingControls(candidates);
-    if (dom.overlayStatus) dom.overlayStatus.textContent = '[Mapping Required]';
-    return;
-  }
-
-  state.overlayMappingPending = false;
-  state.overlayMappingCandidates = [];
-  state.overlayMappingActive = false;
-  state.overlayLastCandidates = [];
-  state.pendingOverlayHTML = '';
-  state.overlayFields = [];
-  state.overlayFieldValues = {};
-  renderOverlayFieldControls();
 }
 
 function findOverlayElement(field) {
@@ -2864,6 +2796,7 @@ window.clearOverlay = () => {
   state.overlayVideoElements = [];
   state.overlayMappingPending = false;
   state.overlayMappingCandidates = [];
+  state.overlayLastCandidates = [];
   state.pendingOverlayHTML = '';
   Object.values(state.overlayObjectUrls).forEach((url) => URL.revokeObjectURL(url));
   state.overlayObjectUrls = {};
