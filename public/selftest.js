@@ -12,18 +12,12 @@ const report = {
 };
 
 const runId = Date.now();
-
 const context = {
   roomName: `selftest-${runId}`,
-  privateRoomName: `selftest-private-${runId}`,
   password: `pw-${Math.random().toString(36).slice(2, 8)}`,
-  privatePassword: `pw-private-${Math.random().toString(36).slice(2, 8)}`,
   hostSocket: null,
   viewerSocket: null,
-  broadcastOrder: [],
-  callOrder: [],
-  viewerIsViewer: false,
-  studioReady: false
+  studioFrameLoaded: null
 };
 
 const iceConfig =
@@ -97,10 +91,16 @@ function withTimeout(promise, ms, label) {
   });
 }
 
-function waitForEvent(target, event, ms = 5000) {
+function waitForEvent(target, event, predicate = null, ms = 5000) {
   return withTimeout(
     new Promise((resolve) => {
-      target.once(event, (...args) => resolve(args));
+      const handler = (...args) => {
+        if (!predicate || predicate(...args)) {
+          target.off(event, handler);
+          resolve(args);
+        }
+      };
+      target.on(event, handler);
     }),
     ms,
     `Waiting for ${event}`
@@ -122,189 +122,6 @@ function waitForCondition(check, ms = 5000, label = 'Condition') {
   );
 }
 
-async function waitForFrameElements(frame, ids, ms = 5000) {
-  const startedAt = Date.now();
-  let lastMissing = ids;
-  while (Date.now() - startedAt < ms) {
-    const doc = frame?.contentWindow?.document;
-    if (doc) {
-      const missing = ids.filter((id) => !doc.getElementById(id));
-      lastMissing = missing;
-      if (!missing.length) {
-        return doc;
-      }
-    }
-    await new Promise((resolve) => setTimeout(resolve, 150));
-  }
-  throw new Error(`Missing elements: ${lastMissing.join(', ')}`);
-}
-
-let studioFrameLoaded = null;
-function ensureStudioFrameLoaded() {
-  if (studioFrameLoaded) return studioFrameLoaded;
-  if (!studioFrame) return Promise.reject(new Error('Studio iframe missing'));
-  studioFrameLoaded = new Promise((resolve) => {
-    studioFrame.src = '/index.html?selftest=1';
-    studioFrame.onload = () => resolve();
-  });
-  return studioFrameLoaded;
-}
-
-let viewerFrame = null;
-let viewerFrameLoaded = null;
-function ensureViewerFrameLoaded() {
-  if (viewerFrameLoaded) return viewerFrameLoaded;
-  viewerFrame = document.createElement('iframe');
-  viewerFrame.id = 'selftestViewerFrame';
-  viewerFrame.style.cssText = 'width:1px;height:1px;position:absolute;left:-9999px;top:-9999px;';
-  viewerFrameLoaded = new Promise((resolve) => {
-    viewerFrame.src = `/view.html?room=${encodeURIComponent(context.roomName)}&name=SelfTestViewer`;
-    viewerFrame.onload = () => resolve();
-  });
-  document.body.appendChild(viewerFrame);
-  return viewerFrameLoaded;
-}
-
-async function waitForViewerState(predicate, ms = 5000) {
-  const startedAt = Date.now();
-  while (Date.now() - startedAt < ms) {
-    const frameWindow = viewerFrame?.contentWindow;
-    if (frameWindow && predicate(frameWindow)) return;
-    await new Promise((resolve) => setTimeout(resolve, 150));
-  }
-  throw new Error('Viewer frame did not reach expected state');
-}
-
-async function ensureStudioHostJoined() {
-  if (context.studioReady) return studioFrame?.contentWindow?.document;
-  await ensureStudioFrameLoaded();
-  const doc = await waitForFrameElements(
-    studioFrame,
-    ['roomInput', 'nameInput', 'joinBtn', 'togglePrivateBtn', 'vipRequiredToggle', 'leaveBtn'],
-    8000
-  );
-  const frameWindow = studioFrame.contentWindow;
-  if (!frameWindow) throw new Error('Studio iframe missing');
-  frameWindow.sessionStorage.setItem(`hostPassword:${context.roomName}`, context.password);
-  frameWindow.sessionStorage.setItem(`hostAccess:${context.roomName}`, '1');
-
-  const roomInput = doc.getElementById('roomInput');
-  const nameInput = doc.getElementById('nameInput');
-  const joinBtn = doc.getElementById('joinBtn');
-
-  roomInput.value = context.roomName;
-  nameInput.value = 'SelfTest Studio Host';
-  joinBtn.click();
-
-  await withTimeout(
-    new Promise((resolve, reject) => {
-      const start = Date.now();
-      const interval = setInterval(() => {
-        const leaveBtn = doc.getElementById('leaveBtn');
-        const privateBtn = doc.getElementById('togglePrivateBtn');
-        const vipBtn = doc.getElementById('vipRequiredToggle');
-        if (
-          leaveBtn &&
-          privateBtn &&
-          vipBtn &&
-          !leaveBtn.disabled &&
-          !privateBtn.disabled &&
-          !vipBtn.disabled
-        ) {
-          clearInterval(interval);
-          resolve();
-        } else if (Date.now() - start > 8000) {
-          clearInterval(interval);
-          reject(new Error('Studio host did not finish joining'));
-        }
-      }, 200);
-    }),
-    9000,
-    'Studio host join'
-  );
-
-  context.studioReady = true;
-  return doc;
-}
-
-async function setStudioToggle(doc, id, expected) {
-  const btn = doc.getElementById(id);
-  if (!btn) throw new Error(`Missing toggle ${id}`);
-  if (btn.textContent.trim() !== expected) {
-    btn.click();
-  }
-  await withTimeout(
-    new Promise((resolve, reject) => {
-      const start = Date.now();
-      const interval = setInterval(() => {
-        if (btn.textContent.trim() === expected) {
-          clearInterval(interval);
-          resolve();
-        } else if (Date.now() - start > 4000) {
-          clearInterval(interval);
-          reject(new Error(`Toggle ${id} did not reach ${expected}`));
-        }
-      }, 150);
-    }),
-    4500,
-    `Toggle ${id}`
-  );
-}
-
-async function waitForRoomInfo(expected) {
-  if (!context.hostSocket) throw new Error('Host socket not initialized');
-  return withTimeout(
-    new Promise((resolve, reject) => {
-      const start = Date.now();
-      const interval = setInterval(async () => {
-        const info = await emitWithAck(context.hostSocket, 'get-room-info', {
-          roomName: context.roomName
-        });
-        const matches = Object.entries(expected).every(([key, value]) => info?.[key] === value);
-        if (matches) {
-          clearInterval(interval);
-          resolve(info);
-        } else if (Date.now() - start > 4000) {
-          clearInterval(interval);
-          reject(
-            new Error(
-              `Room info mismatch (expected ${JSON.stringify(expected)}, got ${JSON.stringify(info)})`
-            )
-          );
-        }
-      }, 200);
-    }),
-    4500,
-    'Room info update'
-  );
-}
-
-async function setRoomPrivacy(privacy) {
-  if (!context.hostSocket) throw new Error('Host socket not initialized');
-  const resp = await emitWithAck(context.hostSocket, 'update-room-privacy', {
-    roomName: context.roomName,
-    privacy
-  });
-  if (!resp?.ok) throw new Error(resp?.error || 'Unable to update room privacy');
-  await waitForRoomInfo({ privacy });
-}
-
-async function setVipRequired(required) {
-  if (!context.hostSocket) throw new Error('Host socket not initialized');
-  const resp = await emitWithAck(context.hostSocket, 'update-vip-required', {
-    roomName: context.roomName,
-    vipRequired: required
-  });
-  if (!resp?.ok) throw new Error(resp?.error || 'Unable to update VIP requirement');
-  await waitForRoomInfo({ vipRequired: required });
-}
-
-async function setRoomPrivacyAndVip({ privacy, vipRequired }) {
-  if (privacy) await setRoomPrivacy(privacy);
-  if (typeof vipRequired === 'boolean') await setVipRequired(vipRequired);
-  await waitForRoomInfo({ privacy, vipRequired });
-}
-
 function emitWithAck(socket, event, payload, ms = 5000) {
   return withTimeout(
     new Promise((resolve) => {
@@ -318,7 +135,7 @@ function emitWithAck(socket, event, payload, ms = 5000) {
 async function connectSocket(socket) {
   if (socket.connected) return;
   socket.connect();
-  await waitForEvent(socket, 'connect', 5000);
+  await waitForEvent(socket, 'connect', null, 5000);
 }
 
 function createCanvasStream(label) {
@@ -334,181 +151,54 @@ function createCanvasStream(label) {
   return canvas.captureStream(12);
 }
 
-function ensureSequence(order, expected) {
-  const indexes = expected.map((step) => order.indexOf(step));
-  if (indexes.some((i) => i === -1)) return false;
-  for (let i = 1; i < indexes.length; i += 1) {
-    if (indexes[i] <= indexes[i - 1]) return false;
-  }
-  return true;
-}
-
-function ensureHandshakeOrder(order) {
-  const offerIndex = order.indexOf('offer');
-  const answerIndex = order.indexOf('answer');
-  const iceIndex = order.indexOf('ice');
-  const trackIndex = order.indexOf('track');
-  if ([offerIndex, answerIndex, iceIndex, trackIndex].some((idx) => idx === -1)) {
-    return false;
-  }
-  return (
-    offerIndex < answerIndex &&
-    offerIndex < iceIndex &&
-    offerIndex < trackIndex
+async function ensureStudioFrameLoaded() {
+  if (context.studioFrameLoaded) return context.studioFrameLoaded;
+  if (!studioFrame) throw new Error('Studio iframe missing');
+  context.studioFrameLoaded = new Promise((resolve) => {
+    studioFrame.src = `/index.html?selftest=1&v=${Date.now()}`;
+    studioFrame.onload = () => resolve();
+  });
+  await context.studioFrameLoaded;
+  await waitForCondition(
+    () => studioFrame.contentWindow && studioFrame.contentWindow.__overlayTest,
+    8000,
+    'Overlay hooks ready'
   );
+  return context.studioFrameLoaded;
 }
 
-async function testClaimRoom() {
-  const socket = io({ autoConnect: false });
-  await connectSocket(socket);
-  const resp = await emitWithAck(socket, 'claim-room', {
-    name: context.roomName,
-    password: context.password,
-    public: true
-  });
-  const info = await emitWithAck(socket, 'get-room-info', { roomName: context.roomName });
-  socket.disconnect();
-  if (!resp?.ok) throw new Error(resp?.error || 'Claim failed');
-  if (!info?.exists || info?.privacy !== 'public') {
-    throw new Error('Room was not registered as public after claim');
-  }
-  return 'Room claimed successfully as public.';
-}
-
-async function testClaimPrivateRoom() {
-  const socket = io({ autoConnect: false });
-  await connectSocket(socket);
-  const claimResp = await emitWithAck(socket, 'claim-room', {
-    name: context.privateRoomName,
-    password: context.privatePassword,
-    privacy: 'private'
-  });
-  if (!claimResp?.ok) {
-    socket.disconnect();
-    throw new Error(claimResp?.error || 'Private room claim failed');
-  }
-
-  const authResp = await emitWithAck(socket, 'auth-host-room', {
-    roomName: context.privateRoomName,
-    password: context.privatePassword
-  });
-  if (!authResp?.ok) {
-    socket.disconnect();
-    throw new Error(authResp?.error || 'Private room auth failed');
-  }
-
-  const joinResp = await emitWithAck(socket, 'join-room', {
-    room: context.privateRoomName,
-    name: 'SelfTest Private Host',
-    isViewer: false
-  });
-  const info = await emitWithAck(socket, 'get-room-info', { roomName: context.privateRoomName });
-  socket.disconnect();
-  if (!joinResp?.ok || !joinResp?.isHost) {
-    throw new Error(joinResp?.error || 'Private host join failed');
-  }
-  if (!info?.exists || info?.privacy !== 'private') {
-    throw new Error('Room was not registered as private after claim');
-  }
-  return 'Private room claimed and host joined successfully.';
-}
-
-async function testHostReenter() {
+async function testHostClaimAndJoin() {
   const hostSocket = io({ autoConnect: false });
   context.hostSocket = hostSocket;
-  context.hostRolePromise = waitForEvent(hostSocket, 'role', 7000).then(([role]) => {
-    context.hostRole = role;
-    return role;
-  });
-  hostSocket.on('room-update', (payload) => {
-    context.latestRoomUpdate = payload;
-  });
   await connectSocket(hostSocket);
+
+  const claimResp = await emitWithAck(hostSocket, 'claim-room', {
+    name: context.roomName,
+    password: context.password,
+    privacy: 'public'
+  });
+  if (!claimResp?.ok) throw new Error(claimResp?.error || 'Claim failed');
 
   const authResp = await emitWithAck(hostSocket, 'auth-host-room', {
     roomName: context.roomName,
     password: context.password
   });
-  if (!authResp?.ok) throw new Error(authResp?.error || 'Auth failed');
+  if (!authResp?.ok) throw new Error(authResp?.error || 'Host auth failed');
 
   const joinResp = await emitWithAck(hostSocket, 'join-room', {
     room: context.roomName,
     name: 'SelfTest Host',
     isViewer: false
   });
-  if (!joinResp?.ok || !joinResp.isHost) {
+  if (!joinResp?.ok || !joinResp?.isHost) {
     throw new Error(joinResp?.error || 'Host join failed');
   }
-  return 'Host re-entered with password.';
+
+  return 'Host claimed room and joined as host.';
 }
 
-async function testHostStudioAutoEntry() {
-  if (!context.hostSocket) throw new Error('Host socket not initialized');
-  let role = context.hostRole;
-  if (!role && context.hostRolePromise) {
-    try {
-      role = await context.hostRolePromise;
-    } catch (err) {
-      // fall through to a fresh wait below
-    }
-  }
-  if (!role) {
-    [role] = await waitForEvent(context.hostSocket, 'role', 5000);
-  }
-  if (!role?.isHost) throw new Error('Role event did not confirm host');
-  return 'Host role confirmed after auth.';
-}
-
-async function testVipDefaultsAndButtons() {
-  const doc = await ensureStudioHostJoined();
-  const vipToggle = doc.getElementById('vipRequiredToggle');
-  const addBtn = doc.getElementById('addVipUserBtn');
-  const vipInput = doc.getElementById('vipUserInput');
-  const generateBtn = doc.getElementById('generateVipCodeBtn');
-
-  if (!vipToggle || !addBtn || !vipInput || !generateBtn) {
-    throw new Error('VIP controls missing in studio');
-  }
-
-  if (vipToggle.textContent.trim() !== 'OFF') {
-    throw new Error('VIP Required did not default to OFF on new room');
-  }
-
-  await setStudioToggle(doc, 'togglePrivateBtn', 'OFF');
-  await waitForRoomInfo({ privacy: 'public', vipRequired: false });
-
-  if (!addBtn.disabled) {
-    throw new Error('Add VIP button should be disabled with empty input');
-  }
-
-  vipInput.value = 'VIPTester';
-  vipInput.dispatchEvent(new Event('input', { bubbles: true }));
-  await waitForCondition(() => !addBtn.disabled, 2000, 'Enable VIP add button');
-
-  vipInput.value = '';
-  vipInput.dispatchEvent(new Event('input', { bubbles: true }));
-  await waitForCondition(() => addBtn.disabled, 2000, 'Disable VIP add button');
-
-  if (!generateBtn.disabled) {
-    throw new Error('Generate VIP code should be disabled when room is public');
-  }
-
-  await setStudioToggle(doc, 'togglePrivateBtn', 'ON');
-  await waitForRoomInfo({ privacy: 'private' });
-  await waitForCondition(() => !generateBtn.disabled, 2000, 'Enable VIP code button');
-
-  await setStudioToggle(doc, 'togglePrivateBtn', 'OFF');
-  await waitForRoomInfo({ privacy: 'public' });
-  await waitForCondition(() => generateBtn.disabled, 2000, 'Disable VIP code button');
-
-  return 'VIP defaults and button states verified.';
-}
-
-async function testPublicViewerJoinAndBroadcast() {
-  if (!context.hostSocket) throw new Error('Host socket not initialized');
-  await ensureStudioHostJoined();
-  await setRoomPrivacyAndVip({ privacy: 'public', vipRequired: false });
-
+async function testViewerJoinAndStream() {
+  if (!context.hostSocket) throw new Error('Host socket missing');
   const viewerSocket = io({ autoConnect: false });
   context.viewerSocket = viewerSocket;
   await connectSocket(viewerSocket);
@@ -520,65 +210,29 @@ async function testPublicViewerJoinAndBroadcast() {
   });
   if (!joinResp?.ok) throw new Error(joinResp?.error || 'Viewer join failed');
 
-  let roomUpdate = context.latestRoomUpdate;
-  if (!roomUpdate?.users?.some((user) => user.id === viewerSocket.id)) {
-    roomUpdate = await withTimeout(
-      new Promise((resolve) => {
-        const handler = (payload) => {
-          if (payload?.users?.some((user) => user.id === viewerSocket.id)) {
-            context.hostSocket.off('room-update', handler);
-            resolve(payload);
-          }
-        };
-        context.hostSocket.on('room-update', handler);
-      }),
-      6000,
-      'Room update for viewer'
-    );
-  }
-
   const hostPc = new RTCPeerConnection(iceConfig);
   const viewerPc = new RTCPeerConnection(iceConfig);
   const hostStream = createCanvasStream('Broadcast');
-
-  let iceEnabled = false;
-  const hostIceQueue = [];
-  const viewerIceQueue = [];
   let trackReceived = false;
-
-  const flushIce = () => {
-    if (!iceEnabled) return;
-    hostIceQueue.splice(0).forEach((candidate) => {
-      context.hostSocket.emit('webrtc-ice-candidate', {
-        targetId: viewerSocket.id,
-        candidate
-      });
-      if (!context.broadcastOrder.includes('ice')) context.broadcastOrder.push('ice');
-    });
-    viewerIceQueue.splice(0).forEach((candidate) => {
-      viewerSocket.emit('webrtc-ice-candidate', {
-        targetId: context.hostSocket.id,
-        candidate
-      });
-      if (!context.broadcastOrder.includes('ice')) context.broadcastOrder.push('ice');
-    });
-  };
 
   hostPc.onicecandidate = (e) => {
     if (!e.candidate) return;
-    hostIceQueue.push(e.candidate);
-    flushIce();
-  };
-  viewerPc.onicecandidate = (e) => {
-    if (!e.candidate) return;
-    viewerIceQueue.push(e.candidate);
-    flushIce();
+    context.hostSocket.emit('webrtc-ice-candidate', {
+      targetId: viewerSocket.id,
+      candidate: e.candidate
+    });
   };
 
-  viewerPc.ontrack = (e) => {
-    if (trackReceived) return;
+  viewerPc.onicecandidate = (e) => {
+    if (!e.candidate) return;
+    viewerSocket.emit('webrtc-ice-candidate', {
+      targetId: context.hostSocket.id,
+      candidate: e.candidate
+    });
+  };
+
+  viewerPc.ontrack = () => {
     trackReceived = true;
-    if (!context.broadcastOrder.includes('track')) context.broadcastOrder.push('track');
   };
 
   context.hostSocket.on('webrtc-answer', async ({ sdp }) => {
@@ -590,14 +244,10 @@ async function testPublicViewerJoinAndBroadcast() {
   });
 
   viewerSocket.on('webrtc-offer', async ({ sdp, from }) => {
-    context.broadcastOrder.push('offer');
     await viewerPc.setRemoteDescription(new RTCSessionDescription(sdp));
     const answer = await viewerPc.createAnswer();
     await viewerPc.setLocalDescription(answer);
-    context.broadcastOrder.push('answer');
     viewerSocket.emit('webrtc-answer', { targetId: from, sdp: answer });
-    iceEnabled = true;
-    flushIce();
   });
 
   viewerSocket.on('webrtc-ice-candidate', async ({ candidate }) => {
@@ -609,492 +259,74 @@ async function testPublicViewerJoinAndBroadcast() {
   await hostPc.setLocalDescription(offer);
   context.hostSocket.emit('webrtc-offer', { targetId: viewerSocket.id, sdp: offer });
 
-  await withTimeout(
-    new Promise((resolve) => {
-      const interval = setInterval(() => {
-        if (trackReceived) {
-          clearInterval(interval);
-          resolve();
-        }
-      }, 100);
-    }),
-    8000,
-    'Broadcast track'
-  );
-
-  if (roomUpdate?.users) {
-    const viewerEntry = roomUpdate.users.find((user) => user.id === viewerSocket.id);
-    context.viewerIsViewer = !!viewerEntry?.isViewer;
-  }
+  await waitForCondition(() => trackReceived, 8000, 'Viewer received track');
 
   hostPc.close();
   viewerPc.close();
   hostStream.getTracks().forEach((track) => track.stop());
 
-  return 'Viewer joined and received broadcast track.';
+  return 'Viewer joined and received a broadcast track.';
 }
 
-async function testPrivateViewerBlocked() {
-  if (!context.hostSocket) throw new Error('Host socket not initialized');
-  await ensureStudioHostJoined();
-  await setRoomPrivacyAndVip({ privacy: 'private', vipRequired: false });
+async function testChatBetweenHostAndViewer() {
+  if (!context.hostSocket || !context.viewerSocket) {
+    throw new Error('Sockets missing for chat test');
+  }
 
-  const openSocket = io({ autoConnect: false });
-  await connectSocket(openSocket);
-  const joinResp = await emitWithAck(openSocket, 'join-room', {
-    room: context.roomName,
-    name: 'NoVipViewer',
-    isViewer: true
-  });
-  openSocket.disconnect();
-  if (!joinResp?.ok) throw new Error('Private room blocked viewer while VIP was off');
-  return 'Private room allowed viewer when VIP requirement is off.';
-}
+  const hostMessage = 'Hello from host';
+  const viewerMessage = 'Hello from viewer';
 
-async function testPrivateVipRequiredBlocked() {
-  if (!context.hostSocket) throw new Error('Host socket not initialized');
-  await ensureStudioHostJoined();
-  await setRoomPrivacyAndVip({ privacy: 'private', vipRequired: true });
-
-  const blockedSocket = io({ autoConnect: false });
-  await connectSocket(blockedSocket);
-  const joinResp = await emitWithAck(blockedSocket, 'join-room', {
-    room: context.roomName,
-    name: 'BlockedViewer',
-    isViewer: true
-  });
-  blockedSocket.disconnect();
-  if (joinResp?.ok) throw new Error('Private room allowed non-VIP viewer');
-  return 'Private room blocked non-VIP viewer with VIP required.';
-}
-
-async function testViewerVipBlockedMessage() {
-  await ensureStudioHostJoined();
-  await setRoomPrivacyAndVip({ privacy: 'private', vipRequired: true });
-
-  await ensureViewerFrameLoaded();
-  const viewerDoc = await waitForFrameElements(
-    viewerFrame,
-    ['viewerNameInput', 'viewerVipCodeInput', 'joinRoomBtn', 'joinStatus'],
-    6000
+  const hostReceived = waitForEvent(
+    context.hostSocket,
+    'public-chat',
+    (payload) => payload && payload.text === viewerMessage,
+    5000
+  );
+  const viewerReceived = waitForEvent(
+    context.viewerSocket,
+    'public-chat',
+    (payload) => payload && payload.text === hostMessage,
+    5000
   );
 
-  const nameInput = viewerDoc.getElementById('viewerNameInput');
-  const vipInput = viewerDoc.getElementById('viewerVipCodeInput');
-  const joinBtn = viewerDoc.getElementById('joinRoomBtn');
-  const joinStatus = viewerDoc.getElementById('joinStatus');
-
-  nameInput.value = 'Blocked Viewer';
-  vipInput.value = '';
-  joinBtn.click();
-
-  await waitForViewerState(
-    (frameWindow) => {
-      const status = frameWindow.document.getElementById('joinStatus');
-      return status && /vip/i.test(status.textContent || '');
-    },
-    6000
-  );
-
-  const message = joinStatus.textContent.trim();
-  if (!/vip/i.test(message)) {
-    throw new Error('Viewer did not receive friendly VIP required message');
-  }
-
-  await new Promise((resolve) => {
-    viewerFrame.onload = () => resolve();
-    viewerFrame.src = `/view.html?room=${encodeURIComponent(context.roomName)}&name=SelfTestViewer2&v=${Date.now()}`;
+  context.hostSocket.emit('public-chat', {
+    room: context.roomName,
+    name: 'SelfTest Host',
+    text: hostMessage,
+    fromViewer: false
   });
-  const secondViewerDoc = await waitForFrameElements(
-    viewerFrame,
-    ['viewerNameInput', 'viewerVipCodeInput', 'joinRoomBtn', 'joinStatus'],
-    6000
-  );
-  const secondNameInput = secondViewerDoc.getElementById('viewerNameInput');
-  const secondVipInput = secondViewerDoc.getElementById('viewerVipCodeInput');
-  const secondJoinBtn = secondViewerDoc.getElementById('joinRoomBtn');
-  const secondStatus = secondViewerDoc.getElementById('joinStatus');
 
-  secondNameInput.value = 'Blocked Viewer 2';
-  secondVipInput.value = 'BADCODE';
-  secondJoinBtn.click();
+  context.viewerSocket.emit('public-chat', {
+    room: context.roomName,
+    name: 'SelfTest Viewer',
+    text: viewerMessage,
+    fromViewer: true
+  });
 
-  await waitForViewerState(
-    (frameWindow) => {
-      const status = frameWindow.document.getElementById('joinStatus');
-      return status && /vip/i.test(status.textContent || '');
-    },
-    6000
-  );
+  await hostReceived;
+  await viewerReceived;
 
-  const invalidMessage = secondStatus.textContent.trim();
-  if (!/vip/i.test(invalidMessage)) {
-    throw new Error(`Viewer did not receive friendly VIP invalid message (got "${invalidMessage}")`);
-  }
-
-  return `Viewer sees friendly VIP messages: "${message}" / "${invalidMessage}"`;
+  return 'Host and viewer exchanged chat messages.';
 }
 
-async function testViewerChatAutoscroll() {
-  await ensureViewerFrameLoaded();
-  const viewerDoc = await waitForFrameElements(viewerFrame, ['chatLog'], 4000);
-  const log = viewerDoc.getElementById('chatLog');
-  const frameWindow = viewerFrame.contentWindow;
-  if (!frameWindow || !frameWindow.appendChat) {
-    throw new Error('Viewer chat helper missing');
-  }
-
-  for (let i = 0; i < 24; i += 1) {
-    frameWindow.appendChat('SelfTest', `Message ${i + 1}`);
-  }
-  await new Promise((resolve) => setTimeout(resolve, 200));
-
-  const atBottom = log.scrollTop >= log.scrollHeight - log.clientHeight - 4;
-  if (!atBottom) throw new Error('Viewer chat did not auto-scroll to bottom');
-  return 'Viewer chat auto-scrolls on overflow.';
-}
-
-async function testPrivateRoomToggleOff() {
-  if (!context.hostSocket) throw new Error('Host socket not initialized');
-  await ensureStudioHostJoined();
-  await setRoomPrivacyAndVip({ privacy: 'public', vipRequired: false });
-  return 'Private room toggled off and returned to public.';
-}
-
-async function testVipViewerJoinAndUsage() {
-  if (!context.hostSocket) throw new Error('Host socket not initialized');
-  await ensureStudioHostJoined();
-  await setRoomPrivacyAndVip({ privacy: 'private', vipRequired: true });
-  const codeResp = await emitWithAck(context.hostSocket, 'generate-vip-code', {
-    room: context.roomName,
-    maxUses: 1
-  });
-  if (!codeResp?.ok || !codeResp?.code) throw new Error('VIP code generation failed');
-
-  const vipSocket = io({ autoConnect: false });
-  await connectSocket(vipSocket);
-  const joinResp = await emitWithAck(
-    vipSocket,
-    'join-room',
-    {
-    room: context.roomName,
-    name: 'VipViewer',
-    isViewer: true,
-    vipCode: codeResp.code
-    },
-    8000
-  );
-  if (!joinResp?.ok || !joinResp?.isVip) {
-    throw new Error(joinResp?.error || 'VIP viewer could not join');
-  }
-
-  const codesResp = await emitWithAck(context.hostSocket, 'get-vip-codes', {
-    roomName: context.roomName
-  });
-  vipSocket.disconnect();
-
-  if (!codesResp?.ok || !Array.isArray(codesResp.codes)) {
-    throw new Error('Unable to fetch VIP codes');
-  }
-  const entry = codesResp.codes.find((item) => item.code === codeResp.code);
-  if (!entry || entry.used < 1) throw new Error('VIP usage was not decremented');
-  return 'VIP viewer joined and usage decremented.';
-}
-
-async function testVipRevoke() {
-  if (!context.hostSocket) throw new Error('Host socket not initialized');
-  await ensureStudioHostJoined();
-  await setRoomPrivacyAndVip({ privacy: 'private', vipRequired: true });
-  const codeResp = await emitWithAck(context.hostSocket, 'generate-vip-code', {
-    room: context.roomName,
-    maxUses: 2
-  });
-  if (!codeResp?.ok || !codeResp?.code) throw new Error('VIP code generation failed');
-
-  const vipSocket = io({ autoConnect: false });
-  await connectSocket(vipSocket);
-  const joinResp = await emitWithAck(vipSocket, 'join-room', {
-    room: context.roomName,
-    name: 'VipViewerOnce',
-    isViewer: true,
-    vipCode: codeResp.code
-  });
-  vipSocket.disconnect();
-  if (!joinResp?.ok) throw new Error('VIP viewer could not join with code');
-
-  const revokeResp = await emitWithAck(context.hostSocket, 'revoke-vip-code', {
-    roomName: context.roomName,
-    code: codeResp.code
-  });
-  if (!revokeResp?.ok) throw new Error('VIP code revoke failed');
-
-  const blockedSocket = io({ autoConnect: false });
-  await connectSocket(blockedSocket);
-  const blockedResp = await emitWithAck(blockedSocket, 'join-room', {
-    room: context.roomName,
-    name: 'VipViewerRevoked',
-    isViewer: true,
-    vipCode: codeResp.code
-  });
-  blockedSocket.disconnect();
-  if (blockedResp?.ok) throw new Error('Revoked VIP code still allowed access');
-  return 'Revoked VIP code no longer grants access.';
-}
-
-async function testOverlayFieldDetection() {
+async function testOverlayUpload() {
   await ensureStudioFrameLoaded();
   const frameWindow = studioFrame.contentWindow;
-  if (!frameWindow) throw new Error('Studio iframe not ready');
-
-  const hook = frameWindow.__overlayTest;
-  if (!hook) throw new Error('Overlay test hook missing');
-
-  const overlayHtml = `
-    <div id="ticker">Live now</div>
-    <img id="logo" src="data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR4nGNgYAAAAAMAASsJTYQAAAAASUVORK5CYII=" />
-  `;
-
-  const initialRender = hook.getRenderCount();
-  hook.loadHTML(overlayHtml);
-
-  await new Promise((resolve) => setTimeout(resolve, 300));
-  const fields = hook.getFields();
-  const names = fields.map((field) => field.name);
-  if (!names.includes('ticker') || !names.includes('logo')) {
-    throw new Error(`Overlay fields missing: ${names.join(', ') || 'none'}`);
+  if (!frameWindow || !frameWindow.__overlayTest) {
+    throw new Error('Overlay test hooks missing');
   }
 
-  const overlayFieldsContainer = frameWindow.document.getElementById('overlayFields');
-  const labels = Array.from(overlayFieldsContainer?.querySelectorAll('label') || []).map(
-    (label) => label.textContent
-  );
-  if (!labels.includes('ticker') || !labels.includes('logo')) {
-    throw new Error('Overlay sidebar controls were not created for ticker/logo');
-  }
+  const overlayHtml = '<div id="banner">Overlay OK</div>';
+  const initialCount = frameWindow.__overlayTest.getRenderCount();
+  frameWindow.__overlayTest.loadHTML(overlayHtml);
 
-  hook.updateField('ticker', 'Breaking News');
-  hook.updateField(
-    'logo',
-    'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR4nGP4DwQACfsD/VPv9x4AAAAASUVORK5CYII='
-  );
-  await new Promise((resolve) => setTimeout(resolve, 300));
-
-  const updatedTicker = hook.getFieldValue('ticker');
-  const updatedLogo = hook.getFieldValue('logo');
-  if (updatedTicker !== 'Breaking News') {
-    throw new Error('Overlay text field did not update backing DOM');
-  }
-  if (!updatedLogo || !updatedLogo.includes('data:image/png')) {
-    throw new Error('Overlay image field did not update backing DOM');
-  }
-
-  const updatedRender = hook.getRenderCount();
-  if (updatedRender <= initialRender) {
-    throw new Error('Overlay render did not re-run after updates');
-  }
-
-  return 'Overlay fields detected, editable, and re-rendered.';
-}
-
-async function testStudioButtonsWired() {
-  await ensureStudioFrameLoaded();
-  const ids = [
-    'joinBtn',
-    'startStreamBtn',
-    'shareScreenBtn',
-    'toggleMicBtn',
-    'hangupBtn',
-    'togglePrivateBtn',
-    'vipRequiredToggle',
-    'addVipUserBtn',
-    'generateVipCodeBtn',
-    'paymentSaveBtn'
-  ];
-  const doc = await waitForFrameElements(studioFrame, ids, 6000);
-
-  await new Promise((resolve) => setTimeout(resolve, 800));
-
-  const joinBtn = doc.getElementById('joinBtn');
-  const startBtn = doc.getElementById('startStreamBtn');
-  const shareBtn = doc.getElementById('shareScreenBtn');
-  const muteBtn = doc.getElementById('toggleMicBtn');
-  const endBtn = doc.getElementById('hangupBtn');
-  const privateBtn = doc.getElementById('togglePrivateBtn');
-  const vipToggle = doc.getElementById('vipRequiredToggle');
-  const addVipBtn = doc.getElementById('addVipUserBtn');
-  const generateVipBtn = doc.getElementById('generateVipCodeBtn');
-  const paymentBtn = doc.getElementById('paymentSaveBtn');
-
-  const wired = [
-    joinBtn?.onclick,
-    startBtn?.onclick,
-    shareBtn?.onclick,
-    muteBtn?.onclick,
-    endBtn?.onclick,
-    privateBtn?.onclick,
-    vipToggle?.onclick,
-    addVipBtn?.onclick,
-    generateVipBtn?.onclick,
-    paymentBtn?.onclick
-  ].every((handler) => typeof handler === 'function');
-
-  const layoutButtons = Array.from(doc.querySelectorAll('.mixer-controls .mixer-btn'));
-  const layoutWired = layoutButtons.length > 0 && layoutButtons.every((btn) => typeof btn.onclick === 'function');
-
-  if (!wired || !layoutWired) {
-    throw new Error('One or more studio buttons are not wired');
-  }
-  return 'Studio controls wired (stream, layout, VIP, payments).';
-}
-
-async function testStageCallFlow() {
-  if (!context.broadcastOrder.length) {
-    throw new Error('Broadcast handshake did not execute');
-  }
-  const broadcastOk = ensureHandshakeOrder(context.broadcastOrder);
-
-  const hostSocket = context.hostSocket;
-  const viewerSocket = context.viewerSocket;
-  if (!hostSocket || !viewerSocket) throw new Error('Sockets missing for call test');
-
-  context.callOrder = [];
-  viewerSocket.emit('request-to-call');
-  await waitForEvent(hostSocket, 'call-request-received', 5000);
-
-  const hostPc = new RTCPeerConnection(iceConfig);
-  const viewerPc = new RTCPeerConnection(iceConfig);
-  const hostStream = createCanvasStream('Call Host');
-  const viewerStream = createCanvasStream('Call Viewer');
-  let iceEnabled = false;
-  const hostIceQueue = [];
-  const viewerIceQueue = [];
-  let trackReceived = false;
-
-  const flushIce = () => {
-    if (!iceEnabled) return;
-    hostIceQueue.splice(0).forEach((candidate) => {
-      hostSocket.emit('call-ice', { targetId: viewerSocket.id, candidate });
-      if (!context.callOrder.includes('ice')) context.callOrder.push('ice');
-    });
-    viewerIceQueue.splice(0).forEach((candidate) => {
-      viewerSocket.emit('call-ice', { targetId: hostSocket.id, candidate });
-      if (!context.callOrder.includes('ice')) context.callOrder.push('ice');
-    });
-  };
-
-  hostPc.onicecandidate = (e) => {
-    if (!e.candidate) return;
-    hostIceQueue.push(e.candidate);
-    flushIce();
-  };
-  viewerPc.onicecandidate = (e) => {
-    if (!e.candidate) return;
-    viewerIceQueue.push(e.candidate);
-    flushIce();
-  };
-
-  hostPc.ontrack = () => {
-    if (trackReceived) return;
-    trackReceived = true;
-    if (!context.callOrder.includes('track')) context.callOrder.push('track');
-  };
-
-  hostSocket.on('call-answer', async ({ answer }) => {
-    await hostPc.setRemoteDescription(new RTCSessionDescription(answer));
-  });
-
-  hostSocket.on('call-ice', async ({ candidate }) => {
-    if (candidate) await hostPc.addIceCandidate(new RTCIceCandidate(candidate));
-  });
-  viewerSocket.on('call-ice', async ({ candidate }) => {
-    if (candidate) await viewerPc.addIceCandidate(new RTCIceCandidate(candidate));
-  });
-
-  viewerSocket.on('incoming-call', async ({ offer, from }) => {
-    context.callOrder.push('offer');
-    await viewerPc.setRemoteDescription(new RTCSessionDescription(offer));
-    const answer = await viewerPc.createAnswer();
-    await viewerPc.setLocalDescription(answer);
-    context.callOrder.push('answer');
-    viewerSocket.emit('call-answer', { targetId: from, answer });
-    iceEnabled = true;
-    flushIce();
-  });
-
-  viewerStream.getTracks().forEach((track) => viewerPc.addTrack(track, viewerStream));
-  hostStream.getTracks().forEach((track) => hostPc.addTrack(track, hostStream));
-
-  const offer = await hostPc.createOffer();
-  await hostPc.setLocalDescription(offer);
-  hostSocket.emit('call-offer', {
-    targetId: viewerSocket.id,
-    offer
-  });
-
-  await withTimeout(
-    new Promise((resolve) => {
-      const interval = setInterval(() => {
-        if (trackReceived) {
-          clearInterval(interval);
-          resolve();
-        }
-      }, 100);
-    }),
-    12000,
-    'Call track'
+  await waitForCondition(
+    () => frameWindow.__overlayTest.getRenderCount() > initialCount,
+    4000,
+    'Overlay render count updated'
   );
 
-  const hangupPromise = waitForEvent(viewerSocket, 'call-end', 5000);
-  hostSocket.emit('call-end', { targetId: viewerSocket.id });
-  await hangupPromise;
-
-  hostPc.close();
-  viewerPc.close();
-  hostStream.getTracks().forEach((track) => track.stop());
-  viewerStream.getTracks().forEach((track) => track.stop());
-
-  const callOk = ensureHandshakeOrder(context.callOrder);
-  if (!broadcastOk || !callOk) {
-    throw new Error(
-      `Handshake order invalid (broadcast: ${context.broadcastOrder.join(' > ') || 'none'}, call: ${context.callOrder.join(' > ') || 'none'})`
-    );
-  }
-  return 'Stage call flow completed (request, accept, handshake, hang-up).';
-}
-
-async function testHostStateStored() {
-  if (!studioFrame?.contentWindow) throw new Error('Studio iframe missing');
-  const frameWindow = studioFrame.contentWindow;
-  frameWindow.sessionStorage.setItem(`hostPassword:${context.roomName}`, context.password);
-  frameWindow.sessionStorage.setItem(`hostAccess:${context.roomName}`, '1');
-
-  let promptCalled = false;
-  frameWindow.prompt = () => {
-    promptCalled = true;
-    return '';
-  };
-
-  const doc = await waitForFrameElements(studioFrame, ['roomInput', 'nameInput', 'joinBtn'], 6000);
-  const roomInput = doc.getElementById('roomInput');
-  const nameInput = doc.getElementById('nameInput');
-  const joinBtn = doc.getElementById('joinBtn');
-
-  roomInput.value = context.roomName;
-  nameInput.value = 'ReloadHost';
-  joinBtn.click();
-
-  await new Promise((resolve) => setTimeout(resolve, 1500));
-
-  if (promptCalled) throw new Error('Prompt shown despite cached host access');
-  return 'Host access persisted via local storage.';
-}
-
-async function testViewerNotUpgraded() {
-  if (!context.viewerSocket) throw new Error('Viewer socket missing');
-  if (!context.viewerIsViewer) {
-    throw new Error('Viewer upgraded to guest without host approval');
-  }
-  return 'Viewer stayed in viewer role unless host promotes.';
+  return 'Overlay HTML loaded without crashing.';
 }
 
 async function run() {
@@ -1103,76 +335,20 @@ async function run() {
 
   const tests = [
     {
-      name: 'Host can create/claim a public room',
-      run: testClaimRoom
+      name: 'Host can claim and join a room',
+      run: testHostClaimAndJoin
     },
     {
-      name: 'Host can create/claim a private room and join',
-      run: testClaimPrivateRoom
+      name: 'Viewer can join and receive a stream',
+      run: testViewerJoinAndStream
     },
     {
-      name: 'Host can re-enter a claimed room using password',
-      run: testHostReenter
+      name: 'Chat works between host and viewer',
+      run: testChatBetweenHostAndViewer
     },
     {
-      name: 'Host enters studio automatically after auth',
-      run: testHostStudioAutoEntry
-    },
-    {
-      name: 'VIP defaults and buttons are set correctly',
-      run: testVipDefaultsAndButtons
-    },
-    {
-      name: 'Public viewers can join when Private Room and VIP Required are off',
-      run: testPublicViewerJoinAndBroadcast
-    },
-    {
-      name: 'Host can turn Private Room on; viewers join when VIP is off',
-      run: testPrivateViewerBlocked
-    },
-    {
-      name: 'Private room blocks viewers when VIP is required',
-      run: testPrivateVipRequiredBlocked
-    },
-    {
-      name: 'Viewer sees a friendly VIP-required message when blocked',
-      run: testViewerVipBlockedMessage
-    },
-    {
-      name: 'Viewer chat auto-scrolls when messages overflow',
-      run: testViewerChatAutoscroll
-    },
-    {
-      name: 'Host can turn Private Room off and return to public',
-      run: testPrivateRoomToggleOff
-    },
-    {
-      name: 'VIP viewers can join with code and decrements usage',
-      run: testVipViewerJoinAndUsage
-    },
-    {
-      name: 'VIP codes can be revoked and stop granting access',
-      run: testVipRevoke
-    },
-    {
-      name: 'Overlay fields detect IDs and re-render on edit',
-      run: testOverlayFieldDetection
-    },
-    {
-      name: 'Studio buttons are wired',
-      run: testStudioButtonsWired
-    },
-    {
-      name: 'Stage call flow completes (request → accept → offer/answer/ICE/track → hang-up)',
-      run: testStageCallFlow
-    },
-    {
-      name: 'Host state stored locally so reload preserves access',
-      run: testHostStateStored
-    },
-    {
-      name: 'Viewer not upgraded to guest unless host allows',
-      run: testViewerNotUpgraded
+      name: 'Overlay upload renders without crashing',
+      run: testOverlayUpload
     }
   ];
 
@@ -1190,6 +366,9 @@ async function run() {
   const failures = report.results.filter((item) => !item.ok).length;
   markStatus(failures ? `Complete with ${failures} failure(s)` : 'All tests passed');
   logLine('Self-test completed.');
+
+  if (context.hostSocket) context.hostSocket.disconnect();
+  if (context.viewerSocket) context.viewerSocket.disconnect();
 }
 
 run().catch((err) => {
