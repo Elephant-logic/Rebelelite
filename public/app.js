@@ -126,6 +126,9 @@ const state = {
   overlayContainer: null,
   overlayVideoElements: [],
   overlayRenderCount: 0,
+  overlayMappingPending: false,
+  overlayMappingCandidates: [],
+  pendingOverlayHTML: '',
   vipUsers: [],
   vipCodes: [],
   vipRequired: false,
@@ -568,10 +571,19 @@ const TEXT_LIKE_TAGS = new Set([
 
 const KNOWN_OVERLAY_FIELDS = ['ticker', 'tickerTop', 'tickerBottom', 'djName', 'logo'];
 
+function getOverlayFieldAttribute(el) {
+  if (!el || !el.getAttribute) return '';
+  const dataOverlay = el.getAttribute('data-overlay');
+  if (dataOverlay && dataOverlay.trim()) return dataOverlay.trim();
+  const dataOverlayField = el.getAttribute('data-overlay-field');
+  if (dataOverlayField && dataOverlayField.trim()) return dataOverlayField.trim();
+  return '';
+}
+
 function getOverlayFieldName(el) {
   if (!el || !el.getAttribute) return '';
-  const dataName = el.getAttribute('data-overlay-field');
-  if (dataName && dataName.trim()) return dataName.trim();
+  const dataName = getOverlayFieldAttribute(el);
+  if (dataName) return dataName;
   const id = el.getAttribute('id');
   if (id && id.trim()) return id.trim();
   return '';
@@ -607,8 +619,13 @@ function escapeOverlaySelector(value) {
 }
 
 function resolveOverlaySelector(el, fieldName) {
-  if (el?.hasAttribute && el.hasAttribute('data-overlay-field')) {
-    return `[data-overlay-field="${escapeOverlaySelector(fieldName)}"]`;
+  if (el?.hasAttribute) {
+    if (el.hasAttribute('data-overlay')) {
+      return `[data-overlay="${escapeOverlaySelector(fieldName)}"]`;
+    }
+    if (el.hasAttribute('data-overlay-field')) {
+      return `[data-overlay-field="${escapeOverlaySelector(fieldName)}"]`;
+    }
   }
   if (el?.id && el.id.trim()) {
     return `#${escapeOverlaySelector(el.id.trim())}`;
@@ -622,13 +639,208 @@ function resolveOverlaySelector(el, fieldName) {
   return `#${escapeOverlaySelector(fieldName)}`;
 }
 
-function buildOverlayFieldsFromHTML(htmlString) {
-  const parser = new DOMParser();
-  const doc = parser.parseFromString(htmlString, 'text/html');
+function buildOverlayCandidateSelector(el) {
+  if (!el || el.nodeType !== 1) return '';
+  if (el.id && el.id.trim()) {
+    return `#${escapeOverlaySelector(el.id.trim())}`;
+  }
+  if (el.hasAttribute('data-overlay')) {
+    const dataAttr = el.getAttribute('data-overlay');
+    if (dataAttr && dataAttr.trim()) {
+      return `[data-overlay="${escapeOverlaySelector(dataAttr.trim())}"]`;
+    }
+  }
+  if (el.hasAttribute('data-overlay-field')) {
+    const dataAttr = el.getAttribute('data-overlay-field');
+    if (dataAttr && dataAttr.trim()) {
+      return `[data-overlay-field="${escapeOverlaySelector(dataAttr.trim())}"]`;
+    }
+  }
+
+  const segments = [];
+  let current = el;
+  while (current && current.nodeType === 1) {
+    if (current.tagName.toLowerCase() === 'body') break;
+    let segment = current.tagName.toLowerCase();
+    if (current.classList && current.classList.length) {
+      segment +=
+        '.' +
+        Array.from(current.classList)
+          .filter(Boolean)
+          .map((cls) => escapeOverlaySelector(cls))
+          .join('.');
+    }
+    const parent = current.parentElement;
+    if (parent) {
+      const siblings = Array.from(parent.children).filter(
+        (child) => child.tagName === current.tagName
+      );
+      if (siblings.length > 1) {
+        const index = siblings.indexOf(current) + 1;
+        segment += `:nth-of-type(${index})`;
+      }
+    }
+    segments.unshift(segment);
+    current = current.parentElement;
+  }
+  return segments.join(' > ');
+}
+
+function getOverlayCandidateSummary(el) {
+  if (!el || !el.tagName) return 'Unknown element';
+  const tag = el.tagName.toLowerCase();
+  const idPart = el.id ? `#${el.id}` : '';
+  const classPart = el.classList?.length
+    ? `.${Array.from(el.classList).slice(0, 2).join('.')}`
+    : '';
+  let detail = '';
+  if (tag === 'img' || tag === 'source' || tag === 'video') {
+    detail = (el.getAttribute('src') || '').trim();
+  } else {
+    detail = (el.textContent || '').trim();
+  }
+  if (detail.length > 42) detail = `${detail.slice(0, 39)}...`;
+  return `${tag}${idPart}${classPart}${detail ? ` → ${detail}` : ''}`;
+}
+
+function collectOverlayMappingCandidates(doc) {
+  const candidates = [];
+  const selector = ['img', 'video', 'source', ...TEXT_LIKE_TAGS].join(',');
+  const nodes = Array.from(doc.querySelectorAll(selector));
+  nodes.forEach((el, index) => {
+    const type = getOverlayFieldType(el);
+    const selectorValue = buildOverlayCandidateSelector(el);
+    if (!selectorValue) return;
+    const initialValue =
+      type === 'text'
+        ? (el.textContent || '').trim()
+        : (el.getAttribute('src') || '').trim();
+    candidates.push({
+      id: `candidate-${index}`,
+      type,
+      selector: selectorValue,
+      initialValue,
+      summary: getOverlayCandidateSummary(el)
+    });
+  });
+  return candidates;
+}
+
+function renderOverlayMappingControls(candidates) {
+  if (!dom.overlayFields) return;
+  dom.overlayFields.innerHTML = '';
+
+  const wrapper = document.createElement('div');
+  wrapper.className = 'overlay-map';
+
+  const title = document.createElement('div');
+  title.className = 'overlay-map-title';
+  title.textContent = 'Map overlay fields';
+  wrapper.appendChild(title);
+
+  const desc = document.createElement('p');
+  desc.className = 'overlay-map-desc';
+  desc.textContent =
+    'No data-overlay tags were found. Enter a field name for any element you want to control.';
+  wrapper.appendChild(desc);
+
+  const list = document.createElement('div');
+  list.className = 'overlay-map-list';
+
+  candidates.forEach((candidate) => {
+    const row = document.createElement('div');
+    row.className = 'overlay-map-row';
+
+    const summary = document.createElement('div');
+    summary.className = 'overlay-map-target';
+    summary.textContent = candidate.summary;
+    row.appendChild(summary);
+
+    const input = document.createElement('input');
+    input.type = 'text';
+    input.placeholder = 'Field name (e.g. tickerMain)';
+    input.dataset.candidateId = candidate.id;
+    row.appendChild(input);
+
+    list.appendChild(row);
+  });
+
+  wrapper.appendChild(list);
+
+  const actions = document.createElement('div');
+  actions.className = 'overlay-map-actions';
+
+  const applyBtn = document.createElement('button');
+  applyBtn.className = 'btn primary small';
+  applyBtn.textContent = 'Apply Mapping';
+  applyBtn.onclick = () => applyOverlayMapping();
+  actions.appendChild(applyBtn);
+
+  const cancelBtn = document.createElement('button');
+  cancelBtn.className = 'btn small secondary';
+  cancelBtn.textContent = 'Cancel';
+  cancelBtn.onclick = () => clearOverlayMapping();
+  actions.appendChild(cancelBtn);
+
+  wrapper.appendChild(actions);
+  dom.overlayFields.appendChild(wrapper);
+}
+
+function applyOverlayMapping() {
+  if (!state.overlayMappingPending) return;
+  const candidates = state.overlayMappingCandidates || [];
+  const used = new Set();
+  const mappings = [];
+
+  dom.overlayFields
+    .querySelectorAll('.overlay-map-row input')
+    .forEach((input) => {
+      const name = input.value.trim();
+      if (!name || used.has(name)) return;
+      const candidate = candidates.find((item) => item.id === input.dataset.candidateId);
+      if (!candidate) return;
+      used.add(name);
+      mappings.push({
+        name,
+        type: candidate.type,
+        selector: candidate.selector,
+        initialValue: candidate.initialValue
+      });
+    });
+
+  if (!mappings.length) {
+    window.alert('Enter at least one field name to continue.');
+    return;
+  }
+
+  state.overlayMappingPending = false;
+  state.overlayMappingCandidates = [];
+  const pendingHTML = state.pendingOverlayHTML;
+  state.pendingOverlayHTML = '';
+
+  state.overlayFields = mappings;
+  state.overlayFieldValues = {};
+  mappings.forEach((field) => {
+    state.overlayFieldValues[field.name] = field.initialValue;
+  });
+  renderOverlayFieldControls();
+  renderHTMLLayout(pendingHTML);
+  if (dom.overlayStatus) dom.overlayStatus.textContent = '[Loaded]';
+}
+
+function clearOverlayMapping() {
+  state.overlayMappingPending = false;
+  state.overlayMappingCandidates = [];
+  state.pendingOverlayHTML = '';
+  if (dom.overlayFields) dom.overlayFields.innerHTML = '';
+  if (dom.overlayStatus) dom.overlayStatus.textContent = '[Mapping Cancelled]';
+}
+
+function detectOverlayFields(doc) {
   const fields = [];
   const used = new Set();
 
-  doc.querySelectorAll('[data-overlay-field]').forEach((el) => {
+  doc.querySelectorAll('[data-overlay], [data-overlay-field]').forEach((el) => {
     const name = getOverlayFieldName(el);
     if (!name || used.has(name)) return;
     used.add(name);
@@ -643,7 +855,9 @@ function buildOverlayFieldsFromHTML(htmlString) {
 
   const findKnownElement = (fieldName) => {
     const escapedName = escapeOverlaySelector(fieldName);
-    const dataMatch = doc.querySelector(`[data-overlay-field="${escapedName}"]`);
+    const dataMatch =
+      doc.querySelector(`[data-overlay="${escapedName}"]`) ||
+      doc.querySelector(`[data-overlay-field="${escapedName}"]`);
     if (dataMatch) return dataMatch;
     const directMatch = doc.getElementById(fieldName) || doc.querySelector(`.${escapedName}`);
     if (directMatch) return directMatch;
@@ -670,6 +884,29 @@ function buildOverlayFieldsFromHTML(htmlString) {
     fields.push({ name, type, selector, initialValue });
   });
 
+  return fields;
+}
+
+function buildOverlayFieldsFromHTML(htmlString) {
+  const parser = new DOMParser();
+  const doc = parser.parseFromString(htmlString, 'text/html');
+  const fields = detectOverlayFields(doc);
+
+  if (!fields.length) {
+    const candidates = collectOverlayMappingCandidates(doc);
+    if (candidates.length) {
+      state.overlayMappingPending = true;
+      state.overlayMappingCandidates = candidates;
+      state.pendingOverlayHTML = htmlString;
+      renderOverlayMappingControls(candidates);
+      if (dom.overlayStatus) dom.overlayStatus.textContent = '[Mapping Required]';
+      return;
+    }
+  }
+
+  state.overlayMappingPending = false;
+  state.overlayMappingCandidates = [];
+  state.pendingOverlayHTML = '';
   state.overlayFields = fields;
   state.overlayFieldValues = {};
   fields.forEach((field) => {
@@ -763,6 +1000,7 @@ function updateOverlayFieldValue(name, value) {
 
 function renderOverlayFieldControls() {
   if (!dom.overlayFields) return;
+  if (state.overlayMappingPending) return;
   dom.overlayFields.innerHTML = '';
   if (!state.overlayFields.length) return;
 
@@ -2467,8 +2705,10 @@ if (dom.htmlOverlayInput) {
     r.onload = (ev) => {
       const htmlString = ev.target.result;
       buildOverlayFieldsFromHTML(htmlString);
-      renderHTMLLayout(htmlString);
-      if (dom.overlayStatus) dom.overlayStatus.textContent = '[Loaded]';
+      if (!state.overlayMappingPending) {
+        renderHTMLLayout(htmlString);
+        if (dom.overlayStatus) dom.overlayStatus.textContent = '[Loaded]';
+      }
     };
     r.readAsText(f);
   };
@@ -2481,6 +2721,9 @@ window.clearOverlay = () => {
   state.overlayFields = [];
   state.overlayFieldValues = {};
   state.overlayVideoElements = [];
+  state.overlayMappingPending = false;
+  state.overlayMappingCandidates = [];
+  state.pendingOverlayHTML = '';
   Object.values(state.overlayObjectUrls).forEach((url) => URL.revokeObjectURL(url));
   state.overlayObjectUrls = {};
   if (dom.overlayFields) dom.overlayFields.innerHTML = '';
@@ -2490,7 +2733,9 @@ window.clearOverlay = () => {
 window.__overlayTest = {
   loadHTML(htmlString) {
     buildOverlayFieldsFromHTML(htmlString);
-    renderHTMLLayout(htmlString);
+    if (!state.overlayMappingPending) {
+      renderHTMLLayout(htmlString);
+    }
   },
   getFields() {
     return state.overlayFields.map((field) => ({ name: field.name, type: field.type }));
