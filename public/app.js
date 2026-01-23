@@ -771,7 +771,22 @@ function renderHTMLLayout(htmlString) {
 
   const chatHTML = buildChatHTMLFromLogs(14);
 
-  const processedHTML = htmlString
+  // Sanitize HTML to prevent XSS attacks
+  const sanitizedHTML = typeof DOMPurify !== 'undefined'
+    ? DOMPurify.sanitize(htmlString, {
+        ALLOW_UNKNOWN_PROTOCOLS: false,
+        ALLOWED_TAGS: ['div', 'span', 'p', 'h1', 'h2', 'h3', 'h4', 'h5', 'h6',
+                       'img', 'video', 'source', 'strong', 'em', 'b', 'i',
+                       'small', 'label', 'br', 'hr', 'ul', 'ol', 'li', 'a'],
+        ALLOWED_ATTR: ['id', 'class', 'style', 'src', 'href', 'alt', 'title',
+                       'data-overlay-field', 'autoplay', 'loop', 'muted', 'playsinline',
+                       'width', 'height', 'type'],
+        FORBID_TAGS: ['script', 'iframe', 'object', 'embed', 'form', 'input', 'button'],
+        FORBID_ATTR: ['onerror', 'onload', 'onclick', 'onmouseover', 'onfocus', 'onblur']
+      })
+    : htmlString;
+
+  const processedHTML = sanitizedHTML
     .replace(/{{viewers}}/g, viewerCount)
     .replace(/{{guests}}/g, guestCount)
     .replace(/{{title}}/g, streamTitle)
