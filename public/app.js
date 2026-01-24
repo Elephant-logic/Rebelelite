@@ -91,6 +91,7 @@ console.log('Rebel Stream Host App Loaded');
 
 const socket = io({ autoConnect: false });
 const $ = (id) => document.getElementById(id);
+const DEBUG_SIGNAL = window.localStorage.getItem('debugSignal') === '1';
 
 const state = {
   currentRoom: null,
@@ -1202,7 +1203,7 @@ async function startStream() {
 
   state.latestUserList.forEach((u) => {
     if (u.id !== state.myId) {
-      connectViewer(u.id);
+      connectViewer(u.id, { force: true });
     }
   });
 }
@@ -1435,7 +1436,6 @@ function attachBroadcastTracks(pc) {
     }
 
     let videoTrack = streamForVideo.getVideoTracks()[0];
-    let trackStream = streamForVideo;
     if (videoTrack && videoTrack.readyState !== 'live') {
         videoTrack = null;
     }
@@ -1444,22 +1444,26 @@ function attachBroadcastTracks(pc) {
         const fallbackStream = state.localStream || localVideo?.srcObject;
         if (fallbackStream) {
             videoTrack = fallbackStream.getVideoTracks()[0];
-            trackStream = fallbackStream;
         }
         if (!videoTrack && localVideo?.captureStream) {
             const previewStream = localVideo.captureStream(30);
             videoTrack = previewStream.getVideoTracks()[0];
-            trackStream = previewStream;
         }
     }
 
+    const broadcastStream = new MediaStream();
+
     if (videoTrack) {
-        pc.addTrack(videoTrack, trackStream);
+        broadcastStream.addTrack(videoTrack);
+        pc.addTrack(videoTrack, broadcastStream);
     }
 
     if (state.localStream) {
         const at = state.localStream.getAudioTracks()[0];
-        if (at) pc.addTrack(at, state.localStream);
+        if (at) {
+            broadcastStream.addTrack(at);
+            pc.addTrack(at, broadcastStream);
+        }
     }
 }
 
@@ -1499,14 +1503,22 @@ function setupViewerPeerConnection(targetId) {
  * Called when streaming starts or when a new viewer joins.
  * Signaling direction: [HOST] -> (webrtc-offer) -> [SERVER] -> [VIEWER]
  */
-async function connectViewer(targetId) {
-    if (viewerPeers[targetId]) return; //
+async function connectViewer(targetId, { force = false } = {}) {
+    if (viewerPeers[targetId]) {
+        if (!force) return;
+        try {
+            viewerPeers[targetId].close();
+        } catch (e) {}
+        delete viewerPeers[targetId];
+    }
 
     if (!state.localStream || state.localStream.getVideoTracks().length === 0) {
         await startLocalMedia();
     }
 
-    console.log('[Host] connectViewer -> creating offer', { targetId });
+    if (DEBUG_SIGNAL) {
+      console.log('[Host] connectViewer -> creating offer', { targetId });
+    }
     const pc = setupViewerPeerConnection(targetId); //
 
     const offer = await pc.createOffer(); //
@@ -1515,7 +1527,9 @@ async function connectViewer(targetId) {
   await applyBitrateConstraints(pc);
 
   socket.emit('webrtc-offer', { targetId, sdp: offer });
-  console.log('[Host] sent webrtc-offer', { targetId });
+  if (DEBUG_SIGNAL) {
+    console.log('[Host] sent webrtc-offer', { targetId });
+  }
 }
 
 /**
@@ -1524,6 +1538,9 @@ async function connectViewer(targetId) {
  */
 async function handleViewerAnswer({ from, sdp }) {
     if (viewerPeers[from]) {
+        if (DEBUG_SIGNAL) {
+          console.log('[Host] received webrtc-answer', { from });
+        }
         await viewerPeers[from].setRemoteDescription(
             new RTCSessionDescription(sdp)
         ); //
@@ -1728,6 +1745,24 @@ socket.on('user-joined', ({ id, name }) => {
   }
 });
 
+socket.on('viewer-joined', ({ id, name }) => {
+  if (DEBUG_SIGNAL) {
+    console.log('[Host] viewer-joined', { id, name });
+  }
+  if (state.iAmHost && state.isStreaming) {
+    connectViewer(id, { force: true });
+  }
+});
+
+socket.on('viewer-ready', ({ id, name }) => {
+  if (DEBUG_SIGNAL) {
+    console.log('[Host] viewer-ready', { id, name });
+  }
+  if (state.iAmHost && state.isStreaming) {
+    connectViewer(id, { force: true });
+  }
+});
+
 socket.on('user-left', ({ id }) => {
   if (viewerPeers[id]) {
     viewerPeers[id].close();
@@ -1766,6 +1801,12 @@ socket.on('room-update', ({ locked, streamTitle, ownerId, users, vipRequired, pr
 
   if (state.overlayActive) {
     renderHTMLLayout(state.currentRawHTML);
+  }
+
+  if (state.iAmHost && state.isStreaming) {
+    state.latestUserList
+      .filter((u) => u.isViewer && u.id !== state.myId)
+      .forEach((u) => connectViewer(u.id, { force: true }));
   }
 });
 
@@ -2293,6 +2334,9 @@ function sendPublic() {
     name: state.userName,
     text: t
   });
+  if (DEBUG_SIGNAL) {
+    console.log('[Host] public-chat sent', { room: state.currentRoom });
+  }
 
   dom.inputPublic.value = '';
 }
@@ -2333,6 +2377,9 @@ if (dom.inputPrivate) {
 
 socket.on('public-chat', (d) => {
   if (state.mutedUsers.has(d.name)) return;
+  if (DEBUG_SIGNAL) {
+    console.log('[Host] public-chat received', { name: d.name });
+  }
   const log = $('chatLogPublic');
   appendChat(log, d.name, d.text, d.ts);
   if (tabs.stream && !tabs.stream.classList.contains('active')) {

@@ -29,6 +29,12 @@ app.use(express.static(path.join(__dirname, 'public')));
 // In-memory room state (per room: owner, lock state, users)
 const rooms = Object.create(null);
 const vipTokens = new Map();
+const DEBUG_SIGNAL = process.env.DEBUG_SIGNAL === '1';
+
+function debugLog(...args) {
+  if (!DEBUG_SIGNAL) return;
+  console.log('[Signal]', ...args);
+}
 
 // Persistent room registry (in-memory for now, structured for easy DB swap).
 const roomDirectory = {
@@ -788,6 +794,12 @@ io.on('connection', (socket) => {
     socket.data.isVip = isVip;
     socket.data.roomRole = isVip ? 'vip' : viewerMode ? 'viewer' : 'host';
 
+    debugLog('join-room', {
+      room: roomName,
+      socketId: socket.id,
+      role: socket.data.roomRole
+    });
+
     if (!info.ownerId && !viewerMode) {
       info.ownerId = socket.id;
     }
@@ -821,6 +833,10 @@ io.on('connection', (socket) => {
       response.vipRequired = !!directoryEntry.vipRequired;
     }
     reply(response);
+
+    if (viewerMode && info.ownerId) {
+      io.to(info.ownerId).emit('viewer-joined', { id: socket.id, name: displayName });
+    }
 
     if (viewerMode && vipByCode && directoryEntry) {
       const hostId = info.ownerId;
@@ -912,9 +928,11 @@ io.on('connection', (socket) => {
   // WEBRTC BROADCAST SIGNALING (host <-> viewer)
   // ======================================================
   socket.on('webrtc-offer', ({ targetId, sdp }) => {
+    debugLog('webrtc-offer', { from: socket.id, targetId });
     if (targetId && sdp) relayToTarget('webrtc-offer', targetId, { sdp, from: socket.id });
   });
   socket.on('webrtc-answer', ({ targetId, sdp }) => {
+    debugLog('webrtc-answer', { from: socket.id, targetId });
     if (targetId && sdp) relayToTarget('webrtc-answer', targetId, { sdp, from: socket.id });
   });
   socket.on('webrtc-ice-candidate', ({ targetId, candidate }) => {
@@ -946,8 +964,9 @@ io.on('connection', (socket) => {
   // CHAT + FILE EVENTS
   // ======================================================
   socket.on('public-chat', ({ room, name, text, fromViewer }) => {
-    const roomName = room || socket.data.room;
+    const roomName = normalizeRoomName(room || socket.data.room);
     if (!roomName || !text) return;
+    debugLog('public-chat', { room: roomName, from: socket.id, fromViewer: !!fromViewer });
     const info = rooms[roomName];
     io.to(roomName).emit('public-chat', {
       name: (name || socket.data.name || 'Anon').slice(0, 30),
@@ -956,6 +975,16 @@ io.on('connection', (socket) => {
       isOwner: info && info.ownerId === socket.id,
       fromViewer: !!fromViewer
     });
+  });
+
+  socket.on('viewer-ready', ({ room, name } = {}) => {
+    const roomName = normalizeRoomName(room || socket.data.room);
+    if (!roomName) return;
+    const info = rooms[roomName];
+    if (!info?.ownerId) return;
+    const displayName = (name || socket.data.name || 'Viewer').slice(0, 30);
+    debugLog('viewer-ready', { room: roomName, socketId: socket.id });
+    io.to(info.ownerId).emit('viewer-ready', { id: socket.id, name: displayName });
   });
 
   socket.on('private-chat', ({ room, name, text }) => {
