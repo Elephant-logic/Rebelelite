@@ -530,10 +530,9 @@ function sendChat() {
 
   const text = input.value.trim();
   if (!text) return;
-  const room = normalizeRoomName(state.currentRoom);
 
   socket.emit('public-chat', {
-    room,
+    room: state.currentRoom,
     name: state.myName,
     text,
     fromViewer: true
@@ -610,7 +609,7 @@ async function fetchRoomConfig(roomName) {
 
 window.addEventListener('load', () => {
   const params = new URLSearchParams(window.location.search);
-  const room = normalizeRoomName(params.get('room')) || 'lobby';
+  const room = params.get('room') || 'lobby';
   const nameParam = params.get('name');
   const vipParam = params.get('vipCode') || params.get('vip');
   const vipTokenParam = params.get('vipToken');
