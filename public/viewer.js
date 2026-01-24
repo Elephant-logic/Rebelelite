@@ -314,6 +314,7 @@ socket.on("disconnect", () => {
 });
 
 socket.on('viewer-joined', ({ streamStatus } = {}) => {
+    finalizeViewerJoin();
     const isLive = streamStatus === 'LIVE';
     setViewerStatus(isLive ? 'LIVE' : 'CONNECTED', isLive);
 });
@@ -491,6 +492,15 @@ function appendChat(name, text) {
   log.scrollTop = log.scrollHeight;
 }
 
+function finalizeViewerJoin() {
+  if (state.joined) return;
+  state.joined = true;
+  const joinPanel = $('viewerJoinPanel');
+  if (joinPanel) joinPanel.classList.add('hidden');
+  const joinStatus = $('joinStatus');
+  if (joinStatus) joinStatus.textContent = '';
+}
+
 function getFriendlyVipMessage(error, hasCode) {
   const normalizedError = (error || '').toLowerCase();
   if (normalizedError.includes('invalid') || normalizedError.includes('exhausted')) {
@@ -647,9 +657,7 @@ window.addEventListener('load', () => {
       },
       (resp) => {
         if (resp?.ok) {
-          state.joined = true;
-          if (joinPanel) joinPanel.classList.add('hidden');
-          if (joinStatus) joinStatus.textContent = '';
+          finalizeViewerJoin();
           fetchRoomConfig(state.currentRoom);
         } else {
           if (joinStatus) {
