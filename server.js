@@ -982,14 +982,14 @@ io.on('connection', (socket) => {
     });
   });
 
-  socket.on('viewer-ready', ({ room, name, viewerId } = {}) => {
+  socket.on('viewer-ready', ({ room, name } = {}) => {
     const roomName = normalizeRoomName(room || socket.data.room);
     if (!roomName) return;
     const info = rooms[roomName];
     if (!info?.ownerId) return;
     const displayName = (name || socket.data.name || 'Viewer').slice(0, 30);
     debugLog('viewer-ready', { room: roomName, socketId: socket.id });
-    io.to(info.ownerId).emit('viewer-ready', { id: viewerId || socket.id, name: displayName });
+    io.to(info.ownerId).emit('viewer-ready', { id: socket.id, name: displayName });
   });
 
   socket.on('private-chat', ({ room, name, text }) => {

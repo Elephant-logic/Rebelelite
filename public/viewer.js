@@ -22,11 +22,6 @@ const $ = id => document.getElementById(id);
 const socket = io({ autoConnect: false });
 const DEBUG_SIGNAL = window.localStorage.getItem('debugSignal') === '1';
 
-function normalizeRoomName(roomName) {
-  if (!roomName || typeof roomName !== 'string') return '';
-  return roomName.trim().slice(0, 50);
-}
-
 function getRtcConfig() {
   return { iceServers: getIceServers(state.turnConfig) };
 }
@@ -249,8 +244,7 @@ function createBroadcastPeerConnection() {
     nextPc.ontrack = (e) => {
         if (DEBUG_SIGNAL) {
             console.log('[Viewer] broadcast ontrack', {
-                track: e.track && e.track.kind,
-                streamId: e.streams && e.streams[0] && e.streams[0].id
+                track: e.track && e.track.kind
             });
         }
         if (!state.broadcastStream) {
@@ -560,7 +554,7 @@ function sendChat() {
     fromViewer: true
   });
   if (DEBUG_SIGNAL) {
-    console.log('[Viewer] public-chat sent', { room });
+    console.log('[Viewer] public-chat sent', { room: state.currentRoom });
   }
 
   input.value = '';
@@ -661,43 +655,24 @@ window.addEventListener('load', () => {
   const completeJoin = (vipToken) => {
     const codeValue = vipToken ? '' : vipInput?.value.trim();
     if (!socket.connected) socket.connect();
-    const normalizedRoom = normalizeRoomName(state.currentRoom);
-    if (!normalizedRoom) {
-      if (joinStatus) joinStatus.textContent = 'Invalid room name.';
-      return;
-    }
-    state.currentRoom = normalizedRoom;
-      if (DEBUG_SIGNAL) {
-        console.log('[Viewer] join-room emit', { room: normalizedRoom });
-      }
       socket.emit(
         'join-room',
         {
-          room: normalizedRoom,
+          room: state.currentRoom,
           name: state.myName,
           isViewer: true,
           vipToken,
           vipCode: codeValue
         },
         (resp) => {
-          if (DEBUG_SIGNAL) {
-            console.log('[Viewer] join-room ack', { ok: resp?.ok, error: resp?.error });
-          }
           if (resp?.ok) {
             state.joined = true;
             if (joinPanel) joinPanel.classList.add('hidden');
             if (joinStatus) joinStatus.textContent = '';
             socket.emit('viewer-ready', {
-              room: normalizedRoom,
-              name: state.myName,
-              viewerId: socket.id
+              room: state.currentRoom,
+              name: state.myName
             });
-            if (DEBUG_SIGNAL) {
-              console.log('[Viewer] viewer-ready emitted', {
-                room: normalizedRoom,
-                viewerId: socket.id
-              });
-            }
             fetchRoomConfig(state.currentRoom);
           } else {
             if (joinStatus) {
