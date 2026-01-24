@@ -690,6 +690,9 @@ window.addEventListener('load', () => {
   };
 
   const attemptJoin = async () => {
+    if (DEBUG_SIGNAL) {
+      console.log('[Viewer] join-room click');
+    }
     await roomInfoPromise;
     const chosenName = (nameInput?.value || state.myName || '').trim();
     if (!chosenName) {
