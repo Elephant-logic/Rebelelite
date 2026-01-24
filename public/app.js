@@ -305,6 +305,16 @@ canvas.height = 1080;
 let ctx = canvas.getContext('2d');
 let canvasStream = null;
 
+canvas.style.cssText =
+  'position:fixed; left:-9999px; top:-9999px; width:1px; height:1px; opacity:0; pointer-events:none;';
+if (document.body) {
+  document.body.appendChild(canvas);
+} else {
+  window.addEventListener('load', () => {
+    if (!canvas.isConnected) document.body.appendChild(canvas);
+  });
+}
+
 let lastDrawTime = 0;
 const fpsInterval = 1000 / 30; // Target 30 FPS Lock
 
@@ -327,12 +337,15 @@ function drawMixer(timestamp) {
     if (el) guestVideo = el.querySelector('video');
   }
 
+  const isVideoReady = (videoEl) =>
+    videoEl && videoEl.readyState >= HTMLMediaElement.HAVE_CURRENT_DATA;
+
   if (state.mixerLayout === 'SOLO') {
-    if (myVideo && myVideo.readyState === 4) {
+    if (isVideoReady(myVideo)) {
       ctx.drawImage(myVideo, 0, 0, canvas.width, canvas.height);
     }
   } else if (state.mixerLayout === 'GUEST') {
-    if (guestVideo && guestVideo.readyState === 4) {
+    if (isVideoReady(guestVideo)) {
       ctx.drawImage(guestVideo, 0, 0, canvas.width, canvas.height);
     } else {
       ctx.fillStyle = '#333';
@@ -344,14 +357,14 @@ function drawMixer(timestamp) {
     }
   } else if (state.mixerLayout === 'SPLIT') {
     const participants = [];
-    if (myVideo && myVideo.readyState === 4) {
+    if (isVideoReady(myVideo)) {
       participants.push(myVideo);
     }
 
     Object.keys(callPeers).forEach((id) => {
       const el = document.getElementById(`vid-${id}`);
       const vid = el && el.querySelector('video');
-      if (vid && vid.readyState === 4) {
+      if (isVideoReady(vid)) {
         participants.push(vid);
       }
     });
@@ -374,10 +387,10 @@ function drawMixer(timestamp) {
       }
     });
   } else if (state.mixerLayout === 'PIP') {
-    if (myVideo && myVideo.readyState === 4) {
+    if (isVideoReady(myVideo)) {
       ctx.drawImage(myVideo, 0, 0, canvas.width, canvas.height);
     }
-    if (guestVideo && guestVideo.readyState === 4) {
+    if (isVideoReady(guestVideo)) {
       const pipW = 480;
       const pipH = 270;
       const padding = 30;
@@ -389,13 +402,13 @@ function drawMixer(timestamp) {
       ctx.drawImage(guestVideo, x, y, pipW, pipH);
     }
   } else if (state.mixerLayout === 'PIP_INVERTED') {
-    if (guestVideo && guestVideo.readyState === 4) {
+    if (isVideoReady(guestVideo)) {
       ctx.drawImage(guestVideo, 0, 0, canvas.width, canvas.height);
     } else {
       ctx.fillStyle = '#111';
       ctx.fillRect(0, 0, canvas.width, canvas.height);
     }
-    if (myVideo && myVideo.readyState === 4) {
+    if (isVideoReady(myVideo)) {
       const pipW = 480;
       const pipH = 270;
       const padding = 30;
@@ -984,6 +997,10 @@ async function startLocalMedia() {
       localVideo.muted = true;
     }
 
+    if (!canvasStream || canvasStream.getVideoTracks().length === 0) {
+      canvasStream = canvas.captureStream(30);
+    }
+
     const mixedVideoTrack = canvasStream.getVideoTracks()[0];
 
     const updateViewerPC = (pc) => {
@@ -1407,7 +1424,38 @@ function endPeerCall(id, isIncomingSignal) {
  * Called when creating a viewer PeerConnection.
  */
 function attachBroadcastTracks(pc) {
-    canvasStream.getTracks().forEach(t => pc.addTrack(t, canvasStream)); //
+    let streamForVideo = canvasStream;
+    const primaryTrack =
+        streamForVideo && streamForVideo.getVideoTracks().length
+            ? streamForVideo.getVideoTracks()[0]
+            : null;
+    if (!streamForVideo || !primaryTrack || primaryTrack.readyState !== 'live') {
+        streamForVideo = canvas.captureStream(30);
+        canvasStream = streamForVideo;
+    }
+
+    let videoTrack = streamForVideo.getVideoTracks()[0];
+    let trackStream = streamForVideo;
+    if (videoTrack && videoTrack.readyState !== 'live') {
+        videoTrack = null;
+    }
+    if (!videoTrack) {
+        const localVideo = $('localVideo');
+        const fallbackStream = state.localStream || localVideo?.srcObject;
+        if (fallbackStream) {
+            videoTrack = fallbackStream.getVideoTracks()[0];
+            trackStream = fallbackStream;
+        }
+        if (!videoTrack && localVideo?.captureStream) {
+            const previewStream = localVideo.captureStream(30);
+            videoTrack = previewStream.getVideoTracks()[0];
+            trackStream = previewStream;
+        }
+    }
+
+    if (videoTrack) {
+        pc.addTrack(videoTrack, trackStream);
+    }
 
     if (state.localStream) {
         const at = state.localStream.getAudioTracks()[0];
@@ -1454,6 +1502,11 @@ function setupViewerPeerConnection(targetId) {
 async function connectViewer(targetId) {
     if (viewerPeers[targetId]) return; //
 
+    if (!state.localStream || state.localStream.getVideoTracks().length === 0) {
+        await startLocalMedia();
+    }
+
+    console.log('[Host] connectViewer -> creating offer', { targetId });
     const pc = setupViewerPeerConnection(targetId); //
 
     const offer = await pc.createOffer(); //
@@ -1462,6 +1515,7 @@ async function connectViewer(targetId) {
   await applyBitrateConstraints(pc);
 
   socket.emit('webrtc-offer', { targetId, sdp: offer });
+  console.log('[Host] sent webrtc-offer', { targetId });
 }
 
 /**

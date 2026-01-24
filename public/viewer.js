@@ -218,6 +218,7 @@ function attachViewerStream(stream) {
     if (!v) return;
     if (v.srcObject !== stream) {
         v.srcObject = stream;
+        v.muted = false;
         v.play().catch(() => {});
     }
     setViewerStatus("LIVE", true);
@@ -233,8 +234,14 @@ function createBroadcastPeerConnection() {
     attachCandidateDiagnostics(nextPc, 'Broadcast');
     setupReceiver(nextPc);
 
+    if (nextPc.addTransceiver) {
+        nextPc.addTransceiver('video', { direction: 'recvonly' });
+        nextPc.addTransceiver('audio', { direction: 'recvonly' });
+    }
+
     nextPc.ontrack = (e) => {
-        attachViewerStream(e.streams[0]);
+        const incomingStream = e.streams && e.streams[0] ? e.streams[0] : new MediaStream([e.track]);
+        attachViewerStream(incomingStream);
     };
 
     nextPc.onicecandidate = (e) => {
@@ -255,6 +262,7 @@ function createBroadcastPeerConnection() {
  */
 async function handleBroadcastOffer({ sdp, from }) {
     try {
+        console.log('[Viewer] received webrtc-offer', { from });
         state.hostId = from;
 
         if (state.pc) {
@@ -275,6 +283,7 @@ async function handleBroadcastOffer({ sdp, from }) {
             targetId: state.hostId,
             sdp: answer
         });
+        console.log('[Viewer] sent webrtc-answer', { targetId: state.hostId });
 
         // NEW: Initiate stats polling
         startStatsReporting(state.pc);

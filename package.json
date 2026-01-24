@@ -5,7 +5,8 @@
   "main": "server.js",
   "scripts": {
     "start": "node server.js",
-    "test": "echo \"No automated tests configured.\""
+    "test": "echo \"No automated tests configured.\"",
+    "selftest:headless": "node scripts/selftest-headless.js"
   },
   "engines": {
     "node": ">=18"
@@ -13,5 +14,8 @@
   "dependencies": {
     "express": "^4.19.2",
     "socket.io": "^4.8.1"
+  },
+  "devDependencies": {
+    "playwright": "^1.49.1"
   }
 }
