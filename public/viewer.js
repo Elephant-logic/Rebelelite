@@ -653,30 +653,29 @@ window.addEventListener('load', () => {
 
   const completeJoin = (vipToken) => {
     const codeValue = vipToken ? '' : vipInput?.value.trim();
-    ensureSocketConnected().then(() => {
-      socket.emit(
-        'join-room',
-        {
-          room: state.currentRoom,
-          name: state.myName,
-          isViewer: true,
-          vipToken,
-          vipCode: codeValue
-        },
-        (resp) => {
-          if (resp?.ok) {
-            finalizeViewerJoin();
-            fetchRoomConfig(state.currentRoom);
-          } else {
-            if (joinStatus) {
-              const errorText = resp?.error || '';
-              const hasVipCode = !!codeValue;
-              const vipMessage =
-                state.roomPrivacy === 'private' && state.vipRequired
-                  ? getFriendlyVipMessage(errorText, hasVipCode)
-                  : '';
-              joinStatus.textContent = vipMessage || errorText || 'Unable to join room.';
-            }
+    if (!socket.connected) socket.connect();
+    socket.emit(
+      'join-room',
+      {
+        room: state.currentRoom,
+        name: state.myName,
+        isViewer: true,
+        vipToken,
+        vipCode: codeValue
+      },
+      (resp) => {
+        if (resp?.ok) {
+          finalizeViewerJoin();
+          fetchRoomConfig(state.currentRoom);
+        } else {
+          if (joinStatus) {
+            const errorText = resp?.error || '';
+            const hasVipCode = !!codeValue;
+            const vipMessage =
+              state.roomPrivacy === 'private' && state.vipRequired
+                ? getFriendlyVipMessage(errorText, hasVipCode)
+                : '';
+            joinStatus.textContent = vipMessage || errorText || 'Unable to join room.';
           }
         }
       );
