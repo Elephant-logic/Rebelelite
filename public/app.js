@@ -91,6 +91,7 @@ console.log('Rebel Stream Host App Loaded');
 
 const socket = io({ autoConnect: false });
 const $ = (id) => document.getElementById(id);
+const DEBUG_SIGNAL = window.localStorage.getItem('debugSignal') === '1';
 
 const state = {
   currentRoom: null,
@@ -268,7 +269,7 @@ function applyRoomQueryDefaults() {
   const params = new URLSearchParams(window.location.search);
   const roomParam = params.get('room');
   const roleParam = params.get('role');
-  const roomValue = roomParam ? roomParam.trim() : '';
+  const roomValue = normalizeRoomName(roomParam);
 
   if (roomValue) {
     const roomInput = $('roomInput');
@@ -282,6 +283,11 @@ function applyRoomQueryDefaults() {
   }
 
   return { roomValue, roleParam };
+}
+
+function normalizeRoomName(roomName) {
+  if (!roomName || typeof roomName !== 'string') return '';
+  return roomName.trim().slice(0, 50);
 }
 
 function maybeAutoJoinHost() {
@@ -1202,7 +1208,7 @@ async function startStream() {
 
   state.latestUserList.forEach((u) => {
     if (u.id !== state.myId) {
-      connectViewer(u.id);
+      connectViewer(u.id, { force: true });
     }
   });
 }
@@ -1435,7 +1441,6 @@ function attachBroadcastTracks(pc) {
     }
 
     let videoTrack = streamForVideo.getVideoTracks()[0];
-    let trackStream = streamForVideo;
     if (videoTrack && videoTrack.readyState !== 'live') {
         videoTrack = null;
     }
@@ -1444,22 +1449,26 @@ function attachBroadcastTracks(pc) {
         const fallbackStream = state.localStream || localVideo?.srcObject;
         if (fallbackStream) {
             videoTrack = fallbackStream.getVideoTracks()[0];
-            trackStream = fallbackStream;
         }
         if (!videoTrack && localVideo?.captureStream) {
             const previewStream = localVideo.captureStream(30);
             videoTrack = previewStream.getVideoTracks()[0];
-            trackStream = previewStream;
         }
     }
 
+    const broadcastStream = new MediaStream();
+
     if (videoTrack) {
-        pc.addTrack(videoTrack, trackStream);
+        broadcastStream.addTrack(videoTrack);
+        pc.addTrack(videoTrack, broadcastStream);
     }
 
     if (state.localStream) {
         const at = state.localStream.getAudioTracks()[0];
-        if (at) pc.addTrack(at, state.localStream);
+        if (at) {
+            broadcastStream.addTrack(at);
+            pc.addTrack(at, broadcastStream);
+        }
     }
 }
 
@@ -1499,14 +1508,22 @@ function setupViewerPeerConnection(targetId) {
  * Called when streaming starts or when a new viewer joins.
  * Signaling direction: [HOST] -> (webrtc-offer) -> [SERVER] -> [VIEWER]
  */
-async function connectViewer(targetId) {
-    if (viewerPeers[targetId]) return; //
+async function connectViewer(targetId, { force = false } = {}) {
+    if (viewerPeers[targetId]) {
+        if (!force) return;
+        try {
+            viewerPeers[targetId].close();
+        } catch (e) {}
+        delete viewerPeers[targetId];
+    }
 
     if (!state.localStream || state.localStream.getVideoTracks().length === 0) {
         await startLocalMedia();
     }
 
-    console.log('[Host] connectViewer -> creating offer', { targetId });
+    if (DEBUG_SIGNAL) {
+      console.log('[Host] connectViewer -> creating offer', { targetId });
+    }
     const pc = setupViewerPeerConnection(targetId); //
 
     const offer = await pc.createOffer(); //
@@ -1515,7 +1532,9 @@ async function connectViewer(targetId) {
   await applyBitrateConstraints(pc);
 
   socket.emit('webrtc-offer', { targetId, sdp: offer });
-  console.log('[Host] sent webrtc-offer', { targetId });
+  if (DEBUG_SIGNAL) {
+    console.log('[Host] sent webrtc-offer', { targetId });
+  }
 }
 
 /**
@@ -1524,6 +1543,9 @@ async function connectViewer(targetId) {
  */
 async function handleViewerAnswer({ from, sdp }) {
     if (viewerPeers[from]) {
+        if (DEBUG_SIGNAL) {
+          console.log('[Host] received webrtc-answer', { from });
+        }
         await viewerPeers[from].setRemoteDescription(
             new RTCSessionDescription(sdp)
         ); //
@@ -1609,28 +1631,29 @@ async function ensureHostRoom(roomName) {
 }
 
 async function joinRoomAsHost(room) {
-  if (!room) return;
+  const normalizedRoom = normalizeRoomName(room);
+  if (!normalizedRoom) return;
   state.iAmHost = true;
   state.wasHost = true;
-  if (state.joined && state.currentRoom === room) return;
-  if (state.joined && state.currentRoom && state.currentRoom !== room) {
-    window.location.href = `/index.html?room=${encodeURIComponent(room)}&role=host`;
+  if (state.joined && state.currentRoom === normalizedRoom) return;
+  if (state.joined && state.currentRoom && state.currentRoom !== normalizedRoom) {
+    window.location.href = `/index.html?room=${encodeURIComponent(normalizedRoom)}&role=host`;
     return;
   }
 
-  state.currentRoom = room;
+  state.currentRoom = normalizedRoom;
   const nameInput = $('nameInput');
   state.userName = nameInput && nameInput.value.trim() ? nameInput.value.trim() : 'Host';
 
   if (!socket.connected) socket.connect();
 
-  const access = await ensureHostRoom(room);
+  const access = await ensureHostRoom(normalizedRoom);
   if (!access.ok) {
     alert(access.error || 'Unable to access room.');
     return;
   }
 
-  socket.emit('join-room', { room, name: state.userName, isViewer: false }, (resp) => {
+  socket.emit('join-room', { room: normalizedRoom, name: state.userName, isViewer: false }, (resp) => {
     if (resp?.isHost) {
       state.vipUsers = Array.isArray(resp.vipUsers) ? resp.vipUsers : [];
       state.vipCodes = Array.isArray(resp.vipCodes) ? resp.vipCodes : [];
@@ -1642,13 +1665,13 @@ async function joinRoomAsHost(room) {
       if (typeof resp?.vipRequired === 'boolean') {
         applyVipRequiredState(resp.vipRequired, { emitUpdate: false });
       }
-      socket.emit('get-vip-codes', { roomName: room }, (codesResp) => {
+      socket.emit('get-vip-codes', { roomName: normalizedRoom }, (codesResp) => {
         if (codesResp?.ok) {
           state.vipCodes = Array.isArray(codesResp.codes) ? codesResp.codes : [];
           renderVipCodes();
         }
       });
-      loadRoomConfig(room);
+      loadRoomConfig(normalizedRoom);
     } else if (resp?.error) {
       alert(resp.error);
       return;
@@ -1659,7 +1682,7 @@ async function joinRoomAsHost(room) {
 
   if (dom.leaveBtn) dom.leaveBtn.disabled = false;
 
-  updateLink(room);
+  updateLink(normalizedRoom);
   startLocalMedia();
 }
 
@@ -1672,7 +1695,7 @@ async function autoJoinHostRoom(room) {
 
 if (dom.joinBtn) {
   dom.joinBtn.onclick = () => {
-    const room = $('roomInput').value.trim();
+    const room = normalizeRoomName($('roomInput').value);
     if (!room) return;
 
     state.currentRoom = room;
@@ -1708,9 +1731,10 @@ function generateQR(url) {
 }
 
 function updateLink(roomSlug) {
+  const normalizedRoom = normalizeRoomName(roomSlug);
   const url = new URL(window.location.href);
   url.pathname = url.pathname.replace('index.html', '') + 'view.html';
-  url.search = `?room=${encodeURIComponent(roomSlug)}`;
+  url.search = `?room=${encodeURIComponent(normalizedRoom)}`;
   const finalUrl = url.toString();
 
   const streamLinkInput = $('streamLinkInput');
@@ -1724,7 +1748,25 @@ socket.on('user-joined', ({ id, name }) => {
   appendChat(privateLog, 'System', `${name} joined room`, Date.now());
 
   if (state.iAmHost && state.isStreaming) {
-    connectViewer(id);
+    connectViewer(id, { force: true });
+  }
+});
+
+socket.on('viewer-joined', ({ id, name }) => {
+  if (DEBUG_SIGNAL) {
+    console.log('[Host] viewer-joined', { id, name });
+  }
+  if (state.iAmHost && state.isStreaming) {
+    connectViewer(id, { force: true });
+  }
+});
+
+socket.on('viewer-ready', ({ id, name }) => {
+  if (DEBUG_SIGNAL) {
+    console.log('[Host] viewer-ready', { id, name });
+  }
+  if (state.iAmHost && state.isStreaming) {
+    connectViewer(id, { force: true });
   }
 });
 
@@ -1766,6 +1808,12 @@ socket.on('room-update', ({ locked, streamTitle, ownerId, users, vipRequired, pr
 
   if (state.overlayActive) {
     renderHTMLLayout(state.currentRawHTML);
+  }
+
+  if (state.iAmHost && state.isStreaming) {
+    state.latestUserList
+      .filter((u) => u.isViewer && u.id !== state.myId)
+      .forEach((u) => connectViewer(u.id, { force: true }));
   }
 });
 
@@ -2293,6 +2341,9 @@ function sendPublic() {
     name: state.userName,
     text: t
   });
+  if (DEBUG_SIGNAL) {
+    console.log('[Host] public-chat sent', { room: state.currentRoom });
+  }
 
   dom.inputPublic.value = '';
 }
@@ -2333,6 +2384,9 @@ if (dom.inputPrivate) {
 
 socket.on('public-chat', (d) => {
   if (state.mutedUsers.has(d.name)) return;
+  if (DEBUG_SIGNAL) {
+    console.log('[Host] public-chat received', { name: d.name });
+  }
   const log = $('chatLogPublic');
   appendChat(log, d.name, d.text, d.ts);
   if (tabs.stream && !tabs.stream.classList.contains('active')) {
