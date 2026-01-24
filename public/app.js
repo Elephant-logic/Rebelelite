@@ -1770,6 +1770,24 @@ socket.on('viewer-ready', ({ id, name }) => {
   }
 });
 
+socket.on('viewer-joined', ({ id, name }) => {
+  if (DEBUG_SIGNAL) {
+    console.log('[Host] viewer-joined', { id, name });
+  }
+  if (state.iAmHost && state.isStreaming) {
+    connectViewer(id, { force: true });
+  }
+});
+
+socket.on('viewer-ready', ({ id, name }) => {
+  if (DEBUG_SIGNAL) {
+    console.log('[Host] viewer-ready', { id, name });
+  }
+  if (state.iAmHost && state.isStreaming) {
+    connectViewer(id, { force: true });
+  }
+});
+
 socket.on('user-left', ({ id }) => {
   if (viewerPeers[id]) {
     viewerPeers[id].close();
