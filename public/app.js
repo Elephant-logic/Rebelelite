@@ -1442,7 +1442,6 @@ function attachBroadcastTracks(pc) {
     }
 
     let videoTrack = streamForVideo.getVideoTracks()[0];
-    let trackStream = streamForVideo;
     if (videoTrack && videoTrack.readyState !== 'live') {
         videoTrack = null;
     }
@@ -1451,41 +1450,26 @@ function attachBroadcastTracks(pc) {
         const fallbackStream = state.localStream || localVideo?.srcObject;
         if (fallbackStream) {
             videoTrack = fallbackStream.getVideoTracks()[0];
-            trackStream = fallbackStream;
         }
         if (!videoTrack && localVideo?.captureStream) {
             const previewStream = localVideo.captureStream(30);
             videoTrack = previewStream.getVideoTracks()[0];
-            trackStream = previewStream;
         }
     }
 
+    const broadcastStream = new MediaStream();
+
     if (videoTrack) {
-        pc.addTrack(videoTrack, trackStream);
-        if (DEBUG_SIGNAL) {
-            console.log('[Host] attachBroadcastTracks video', {
-                trackState: videoTrack.readyState,
-                streamId: trackStream && trackStream.id
-            });
-        }
-    } else if (DEBUG_SIGNAL) {
-        console.log('[Host] attachBroadcastTracks missing video track');
+        broadcastStream.addTrack(videoTrack);
+        pc.addTrack(videoTrack, broadcastStream);
     }
 
     if (state.localStream) {
         const at = state.localStream.getAudioTracks()[0];
         if (at) {
-            pc.addTrack(at, state.localStream);
-            if (DEBUG_SIGNAL) {
-                console.log('[Host] attachBroadcastTracks audio', {
-                    trackState: at.readyState
-                });
-            }
-        } else if (DEBUG_SIGNAL) {
-            console.log('[Host] attachBroadcastTracks missing audio track');
+            broadcastStream.addTrack(at);
+            pc.addTrack(at, broadcastStream);
         }
-    } else if (DEBUG_SIGNAL) {
-        console.log('[Host] attachBroadcastTracks missing localStream');
     }
 }
 
@@ -1539,7 +1523,7 @@ async function connectViewer(targetId, { force = false } = {}) {
     }
 
     if (DEBUG_SIGNAL) {
-      console.log('[Host] connectViewer -> creating offer', { targetId, force });
+      console.log('[Host] connectViewer -> creating offer', { targetId });
     }
     const pc = setupViewerPeerConnection(targetId); //
 
@@ -1671,9 +1655,6 @@ async function joinRoomAsHost(room) {
   }
 
   socket.emit('join-room', { room: normalizedRoom, name: state.userName, isViewer: false }, (resp) => {
-    if (DEBUG_SIGNAL) {
-      console.log('[Host] join-room ack', { room: normalizedRoom, ok: resp?.ok, isHost: resp?.isHost });
-    }
     if (resp?.isHost) {
       state.vipUsers = Array.isArray(resp.vipUsers) ? resp.vipUsers : [];
       state.vipCodes = Array.isArray(resp.vipCodes) ? resp.vipCodes : [];
@@ -1767,6 +1748,24 @@ socket.on('user-joined', ({ id, name }) => {
   const privateLog = $('chatLogPrivate');
   appendChat(privateLog, 'System', `${name} joined room`, Date.now());
 
+  if (state.iAmHost && state.isStreaming) {
+    connectViewer(id, { force: true });
+  }
+});
+
+socket.on('viewer-joined', ({ id, name }) => {
+  if (DEBUG_SIGNAL) {
+    console.log('[Host] viewer-joined', { id, name });
+  }
+  if (state.iAmHost && state.isStreaming) {
+    connectViewer(id, { force: true });
+  }
+});
+
+socket.on('viewer-ready', ({ id, name }) => {
+  if (DEBUG_SIGNAL) {
+    console.log('[Host] viewer-ready', { id, name });
+  }
   if (state.iAmHost && state.isStreaming) {
     connectViewer(id, { force: true });
   }
