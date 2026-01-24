@@ -314,6 +314,7 @@ socket.on("disconnect", () => {
 });
 
 socket.on('viewer-joined', ({ streamStatus } = {}) => {
+    finalizeViewerJoin();
     const isLive = streamStatus === 'LIVE';
     setViewerStatus(isLive ? 'LIVE' : 'CONNECTED', isLive);
 });
@@ -491,6 +492,15 @@ function appendChat(name, text) {
   log.scrollTop = log.scrollHeight;
 }
 
+function finalizeViewerJoin() {
+  if (state.joined) return;
+  state.joined = true;
+  const joinPanel = $('viewerJoinPanel');
+  if (joinPanel) joinPanel.classList.add('hidden');
+  const joinStatus = $('joinStatus');
+  if (joinStatus) joinStatus.textContent = '';
+}
+
 function getFriendlyVipMessage(error, hasCode) {
   const normalizedError = (error || '').toLowerCase();
   if (normalizedError.includes('invalid') || normalizedError.includes('exhausted')) {
@@ -547,8 +557,16 @@ function emitWithAck(eventName, payload) {
   });
 }
 
+function ensureSocketConnected() {
+  if (socket.connected) return Promise.resolve();
+  return new Promise((resolve) => {
+    socket.once('connect', resolve);
+    socket.connect();
+  });
+}
+
 async function hydrateRoomInfo(roomName) {
-  if (!socket.connected) socket.connect();
+  await ensureSocketConnected();
   const info = await emitWithAck('get-room-info', { roomName });
   if (info?.privacy) {
     state.roomPrivacy = info.privacy;
@@ -599,7 +617,7 @@ function applyTurnConfig(config) {
 }
 
 async function fetchRoomConfig(roomName) {
-  if (!socket.connected) socket.connect();
+  await ensureSocketConnected();
   const config = await emitWithAck('get-room-config', { roomName });
   if (config?.ok) {
     applyPaymentConfig(config);
@@ -635,35 +653,34 @@ window.addEventListener('load', () => {
 
   const completeJoin = (vipToken) => {
     const codeValue = vipToken ? '' : vipInput?.value.trim();
-    if (!socket.connected) socket.connect();
-    socket.emit(
-      'join-room',
-      {
-        room: state.currentRoom,
-        name: state.myName,
-        isViewer: true,
-        vipToken,
-        vipCode: codeValue
-      },
-      (resp) => {
-        if (resp?.ok) {
-          state.joined = true;
-          if (joinPanel) joinPanel.classList.add('hidden');
-          if (joinStatus) joinStatus.textContent = '';
-          fetchRoomConfig(state.currentRoom);
-        } else {
-          if (joinStatus) {
-            const errorText = resp?.error || '';
-            const hasVipCode = !!codeValue;
-            const vipMessage =
-              state.roomPrivacy === 'private' && state.vipRequired
-                ? getFriendlyVipMessage(errorText, hasVipCode)
-                : '';
-            joinStatus.textContent = vipMessage || errorText || 'Unable to join room.';
+    ensureSocketConnected().then(() => {
+      socket.emit(
+        'join-room',
+        {
+          room: state.currentRoom,
+          name: state.myName,
+          isViewer: true,
+          vipToken,
+          vipCode: codeValue
+        },
+        (resp) => {
+          if (resp?.ok) {
+            finalizeViewerJoin();
+            fetchRoomConfig(state.currentRoom);
+          } else {
+            if (joinStatus) {
+              const errorText = resp?.error || '';
+              const hasVipCode = !!codeValue;
+              const vipMessage =
+                state.roomPrivacy === 'private' && state.vipRequired
+                  ? getFriendlyVipMessage(errorText, hasVipCode)
+                  : '';
+              joinStatus.textContent = vipMessage || errorText || 'Unable to join room.';
+            }
           }
         }
-      }
-    );
+      );
+    });
   };
 
   const attemptJoin = async () => {
