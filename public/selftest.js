@@ -329,6 +329,74 @@ async function testOverlayUpload() {
   return 'Overlay HTML loaded without crashing.';
 }
 
+async function testPaymentSettings() {
+  if (!context.hostSocket) throw new Error('Host socket missing');
+
+  const saveResp = await emitWithAck(context.hostSocket, 'update-room-payments', {
+    roomName: context.roomName,
+    paymentEnabled: true,
+    paymentLabel: 'Tip the host',
+    paymentUrl: 'https://example.com/tip'
+  });
+  if (!saveResp?.ok) throw new Error(saveResp?.error || 'Payment settings save failed');
+
+  const config = await emitWithAck(context.hostSocket, 'get-room-config', {
+    roomName: context.roomName
+  });
+  if (!config?.ok || !config.paymentEnabled || config.paymentLabel !== 'Tip the host') {
+    throw new Error('Payment settings mismatch');
+  }
+  if (!config.paymentUrl || !config.paymentUrl.startsWith('https://')) {
+    throw new Error('Payment URL invalid');
+  }
+
+  return 'Payment settings saved and loaded.';
+}
+
+async function testVipAccessControl() {
+  if (!context.hostSocket) throw new Error('Host socket missing');
+
+  const privacyResp = await emitWithAck(context.hostSocket, 'update-room-privacy', {
+    roomName: context.roomName,
+    privacy: 'private'
+  });
+  if (!privacyResp?.ok) throw new Error(privacyResp?.error || 'Privacy update failed');
+
+  const vipResp = await emitWithAck(context.hostSocket, 'update-vip-required', {
+    roomName: context.roomName,
+    vipRequired: true
+  });
+  if (!vipResp?.ok) throw new Error(vipResp?.error || 'VIP required update failed');
+
+  const codeResp = await emitWithAck(context.hostSocket, 'generate-vip-code', {
+    room: context.roomName,
+    maxUses: 1
+  });
+  if (!codeResp?.ok || !codeResp.code) throw new Error('VIP code generation failed');
+
+  const gateSocket = io({ autoConnect: false });
+  await connectSocket(gateSocket);
+
+  const blockedResp = await emitWithAck(gateSocket, 'join-room', {
+    room: context.roomName,
+    name: 'VIP Gate',
+    isViewer: true
+  });
+  if (blockedResp?.ok) throw new Error('Viewer joined without VIP code');
+
+  const allowedResp = await emitWithAck(gateSocket, 'join-room', {
+    room: context.roomName,
+    name: 'VIP Gate',
+    isViewer: true,
+    vipCode: codeResp.code
+  });
+  if (!allowedResp?.ok) throw new Error(allowedResp?.error || 'VIP join failed');
+
+  gateSocket.disconnect();
+
+  return 'VIP gating rejects without code and allows valid code.';
+}
+
 async function run() {
   updateTimestamp(startedEl, report.startedAt);
   logLine(`Starting self-test for room ${context.roomName}`);
@@ -349,6 +417,14 @@ async function run() {
     {
       name: 'Overlay upload renders without crashing',
       run: testOverlayUpload
+    },
+    {
+      name: 'Payment settings save and load',
+      run: testPaymentSettings
+    },
+    {
+      name: 'VIP gating blocks and allows access',
+      run: testVipAccessControl
     }
   ];
 
