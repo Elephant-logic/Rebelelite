@@ -557,8 +557,16 @@ function emitWithAck(eventName, payload) {
   });
 }
 
+function ensureSocketConnected() {
+  if (socket.connected) return Promise.resolve();
+  return new Promise((resolve) => {
+    socket.once('connect', resolve);
+    socket.connect();
+  });
+}
+
 async function hydrateRoomInfo(roomName) {
-  if (!socket.connected) socket.connect();
+  await ensureSocketConnected();
   const info = await emitWithAck('get-room-info', { roomName });
   if (info?.privacy) {
     state.roomPrivacy = info.privacy;
@@ -609,7 +617,7 @@ function applyTurnConfig(config) {
 }
 
 async function fetchRoomConfig(roomName) {
-  if (!socket.connected) socket.connect();
+  await ensureSocketConnected();
   const config = await emitWithAck('get-room-config', { roomName });
   if (config?.ok) {
     applyPaymentConfig(config);
@@ -670,8 +678,8 @@ window.addEventListener('load', () => {
             joinStatus.textContent = vipMessage || errorText || 'Unable to join room.';
           }
         }
-      }
-    );
+      );
+    });
   };
 
   const attemptJoin = async () => {
