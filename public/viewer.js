@@ -20,7 +20,6 @@
 
 const $ = id => document.getElementById(id);
 const socket = io({ autoConnect: false });
-const DEBUG_SIGNAL = window.localStorage.getItem('debugSignal') === '1';
 
 function getRtcConfig() {
   return { iceServers: getIceServers(state.turnConfig) };
@@ -31,7 +30,6 @@ const state = {
   hostId: null,
   currentRoom: null,
   myName: `Viewer-${Math.floor(Math.random() * 1000)}`,
-  broadcastStream: null,
   callPc: null,
   localCallStream: null,
   statsInterval: null,
@@ -242,18 +240,8 @@ function createBroadcastPeerConnection() {
     }
 
     nextPc.ontrack = (e) => {
-        if (DEBUG_SIGNAL) {
-            console.log('[Viewer] broadcast ontrack', {
-                track: e.track && e.track.kind
-            });
-        }
-        if (!state.broadcastStream) {
-            state.broadcastStream = new MediaStream();
-        }
-        if (e.track && !state.broadcastStream.getTracks().includes(e.track)) {
-            state.broadcastStream.addTrack(e.track);
-        }
-        attachViewerStream(state.broadcastStream);
+        const incomingStream = e.streams && e.streams[0] ? e.streams[0] : new MediaStream([e.track]);
+        attachViewerStream(incomingStream);
     };
 
     nextPc.onicecandidate = (e) => {
@@ -274,9 +262,7 @@ function createBroadcastPeerConnection() {
  */
 async function handleBroadcastOffer({ sdp, from }) {
     try {
-        if (DEBUG_SIGNAL) {
-            console.log('[Viewer] received webrtc-offer', { from });
-        }
+        console.log('[Viewer] received webrtc-offer', { from });
         state.hostId = from;
 
         if (state.pc) {
@@ -285,7 +271,6 @@ async function handleBroadcastOffer({ sdp, from }) {
             } catch (e) {}
             state.pc = null;
         }
-        state.broadcastStream = new MediaStream();
 
         await fetchRoomConfig(state.currentRoom);
         state.pc = createBroadcastPeerConnection();
@@ -298,9 +283,7 @@ async function handleBroadcastOffer({ sdp, from }) {
             targetId: state.hostId,
             sdp: answer
         });
-        if (DEBUG_SIGNAL) {
-            console.log('[Viewer] sent webrtc-answer', { targetId: state.hostId });
-        }
+        console.log('[Viewer] sent webrtc-answer', { targetId: state.hostId });
 
         // NEW: Initiate stats polling
         startStatsReporting(state.pc);
@@ -520,9 +503,6 @@ function getFriendlyVipMessage(error, hasCode) {
 }
 
 socket.on('public-chat', (d) => {
-  if (DEBUG_SIGNAL) {
-    console.log('[Viewer] public-chat received', { name: d.name });
-  }
   appendChat(d.name, d.text);
 });
 
@@ -557,9 +537,6 @@ function sendChat() {
     text,
     fromViewer: true
   });
-  if (DEBUG_SIGNAL) {
-    console.log('[Viewer] public-chat sent', { room: state.currentRoom });
-  }
 
   input.value = '';
 }
@@ -659,28 +636,24 @@ window.addEventListener('load', () => {
   const completeJoin = (vipToken) => {
     const codeValue = vipToken ? '' : vipInput?.value.trim();
     if (!socket.connected) socket.connect();
-      socket.emit(
-        'join-room',
-        {
-          room: state.currentRoom,
-          name: state.myName,
-          isViewer: true,
-          vipToken,
-          vipCode: codeValue
-        },
-        (resp) => {
-          if (resp?.ok) {
-            state.joined = true;
-            if (joinPanel) joinPanel.classList.add('hidden');
-            if (joinStatus) joinStatus.textContent = '';
-            socket.emit('viewer-ready', {
-              room: state.currentRoom,
-              name: state.myName
-            });
-            fetchRoomConfig(state.currentRoom);
-          } else {
-            if (joinStatus) {
-              const errorText = resp?.error || '';
+    socket.emit(
+      'join-room',
+      {
+        room: state.currentRoom,
+        name: state.myName,
+        isViewer: true,
+        vipToken,
+        vipCode: codeValue
+      },
+      (resp) => {
+        if (resp?.ok) {
+          state.joined = true;
+          if (joinPanel) joinPanel.classList.add('hidden');
+          if (joinStatus) joinStatus.textContent = '';
+          fetchRoomConfig(state.currentRoom);
+        } else {
+          if (joinStatus) {
+            const errorText = resp?.error || '';
             const hasVipCode = !!codeValue;
             const vipMessage =
               state.roomPrivacy === 'private' && state.vipRequired
