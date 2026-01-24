@@ -830,6 +830,10 @@ io.on('connection', (socket) => {
 
     socket.to(roomName).emit('user-joined', { id: socket.id, name: displayName });
     broadcastRoomUpdate(roomName);
+    if (viewerMode) {
+      const streamStatus = directoryEntry?.isLive ? 'LIVE' : 'OFFLINE';
+      socket.emit('viewer-joined', { streamStatus });
+    }
     const response = { ok: true, isVip, isHost };
     if (isHost && directoryEntry) {
       response.vipUsers = [...directoryEntry.vipUsers];

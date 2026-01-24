@@ -330,6 +330,11 @@ socket.on("disconnect", () => {
     setViewerStatus("OFFLINE", false);
 });
 
+socket.on('viewer-joined', ({ streamStatus } = {}) => {
+    const isLive = streamStatus === 'LIVE';
+    setViewerStatus(isLive ? 'LIVE' : 'CONNECTED', isLive);
+});
+
 socket.on("webrtc-offer", handleBroadcastOffer);
 socket.on("webrtc-ice-candidate", handleBroadcastIceCandidate);
 
