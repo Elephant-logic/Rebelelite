@@ -708,12 +708,6 @@ window.addEventListener('load', () => {
       return;
     }
 
-    const code = vipInput?.value.trim();
-    if (state.roomPrivacy === 'private' && state.vipRequired && !code) {
-      if (joinStatus) joinStatus.textContent = getFriendlyVipMessage('', false);
-      return;
-    }
-
     completeJoin('');
   };
 
