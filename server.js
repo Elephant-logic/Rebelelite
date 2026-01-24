@@ -694,7 +694,12 @@ io.on('connection', (socket) => {
       return;
     }
 
-    const roomName = room.trim().slice(0, 50);
+    const roomName = normalizeRoomName(room);
+    if (!roomName) {
+      reply({ ok: false, error: 'Invalid room' });
+      socket.emit('room-error', 'Invalid room');
+      return;
+    }
     const rawName = (name && String(name).trim()) || `User-${socket.id.slice(0, 4)}`;
     const displayName = rawName.slice(0, 30);
 
@@ -963,7 +968,7 @@ io.on('connection', (socket) => {
   });
 
   socket.on('private-chat', ({ room, name, text }) => {
-    const roomName = room || socket.data.room;
+    const roomName = normalizeRoomName(room || socket.data.room);
     if (!roomName || !text) return;
     io.to(roomName).emit('private-chat', {
       name: (name || socket.data.name || 'Anon').slice(0, 30),
@@ -973,7 +978,7 @@ io.on('connection', (socket) => {
   });
 
   socket.on('file-share', ({ room, name, fileName, fileType, fileData }) => {
-    const roomName = room || socket.data.room;
+    const roomName = normalizeRoomName(room || socket.data.room);
     if (!roomName || !fileName || !fileData) return;
     io.to(roomName).emit('file-share', {
       name: (name || socket.data.name).slice(0, 30),
