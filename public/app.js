@@ -268,7 +268,7 @@ function applyRoomQueryDefaults() {
   const params = new URLSearchParams(window.location.search);
   const roomParam = params.get('room');
   const roleParam = params.get('role');
-  const roomValue = normalizeRoomName(roomParam);
+  const roomValue = roomParam ? roomParam.trim() : '';
 
   if (roomValue) {
     const roomInput = $('roomInput');
@@ -282,11 +282,6 @@ function applyRoomQueryDefaults() {
   }
 
   return { roomValue, roleParam };
-}
-
-function normalizeRoomName(roomName) {
-  if (!roomName || typeof roomName !== 'string') return '';
-  return roomName.trim().slice(0, 50);
 }
 
 function maybeAutoJoinHost() {
@@ -1614,29 +1609,28 @@ async function ensureHostRoom(roomName) {
 }
 
 async function joinRoomAsHost(room) {
-  const normalizedRoom = normalizeRoomName(room);
-  if (!normalizedRoom) return;
+  if (!room) return;
   state.iAmHost = true;
   state.wasHost = true;
-  if (state.joined && state.currentRoom === normalizedRoom) return;
-  if (state.joined && state.currentRoom && state.currentRoom !== normalizedRoom) {
-    window.location.href = `/index.html?room=${encodeURIComponent(normalizedRoom)}&role=host`;
+  if (state.joined && state.currentRoom === room) return;
+  if (state.joined && state.currentRoom && state.currentRoom !== room) {
+    window.location.href = `/index.html?room=${encodeURIComponent(room)}&role=host`;
     return;
   }
 
-  state.currentRoom = normalizedRoom;
+  state.currentRoom = room;
   const nameInput = $('nameInput');
   state.userName = nameInput && nameInput.value.trim() ? nameInput.value.trim() : 'Host';
 
   if (!socket.connected) socket.connect();
 
-  const access = await ensureHostRoom(normalizedRoom);
+  const access = await ensureHostRoom(room);
   if (!access.ok) {
     alert(access.error || 'Unable to access room.');
     return;
   }
 
-  socket.emit('join-room', { room: normalizedRoom, name: state.userName, isViewer: false }, (resp) => {
+  socket.emit('join-room', { room, name: state.userName, isViewer: false }, (resp) => {
     if (resp?.isHost) {
       state.vipUsers = Array.isArray(resp.vipUsers) ? resp.vipUsers : [];
       state.vipCodes = Array.isArray(resp.vipCodes) ? resp.vipCodes : [];
@@ -1648,13 +1642,13 @@ async function joinRoomAsHost(room) {
       if (typeof resp?.vipRequired === 'boolean') {
         applyVipRequiredState(resp.vipRequired, { emitUpdate: false });
       }
-      socket.emit('get-vip-codes', { roomName: normalizedRoom }, (codesResp) => {
+      socket.emit('get-vip-codes', { roomName: room }, (codesResp) => {
         if (codesResp?.ok) {
           state.vipCodes = Array.isArray(codesResp.codes) ? codesResp.codes : [];
           renderVipCodes();
         }
       });
-      loadRoomConfig(normalizedRoom);
+      loadRoomConfig(room);
     } else if (resp?.error) {
       alert(resp.error);
       return;
@@ -1665,7 +1659,7 @@ async function joinRoomAsHost(room) {
 
   if (dom.leaveBtn) dom.leaveBtn.disabled = false;
 
-  updateLink(normalizedRoom);
+  updateLink(room);
   startLocalMedia();
 }
 
@@ -1678,7 +1672,7 @@ async function autoJoinHostRoom(room) {
 
 if (dom.joinBtn) {
   dom.joinBtn.onclick = () => {
-    const room = normalizeRoomName($('roomInput').value);
+    const room = $('roomInput').value.trim();
     if (!room) return;
 
     state.currentRoom = room;
@@ -1714,10 +1708,9 @@ function generateQR(url) {
 }
 
 function updateLink(roomSlug) {
-  const normalizedRoom = normalizeRoomName(roomSlug);
   const url = new URL(window.location.href);
   url.pathname = url.pathname.replace('index.html', '') + 'view.html';
-  url.search = `?room=${encodeURIComponent(normalizedRoom)}`;
+  url.search = `?room=${encodeURIComponent(roomSlug)}`;
   const finalUrl = url.toString();
 
   const streamLinkInput = $('streamLinkInput');
@@ -1731,25 +1724,7 @@ socket.on('user-joined', ({ id, name }) => {
   appendChat(privateLog, 'System', `${name} joined room`, Date.now());
 
   if (state.iAmHost && state.isStreaming) {
-    connectViewer(id, { force: true });
-  }
-});
-
-socket.on('viewer-joined', ({ id, name }) => {
-  if (DEBUG_SIGNAL) {
-    console.log('[Host] viewer-joined', { id, name });
-  }
-  if (state.iAmHost && state.isStreaming) {
-    connectViewer(id, { force: true });
-  }
-});
-
-socket.on('viewer-ready', ({ id, name }) => {
-  if (DEBUG_SIGNAL) {
-    console.log('[Host] viewer-ready', { id, name });
-  }
-  if (state.iAmHost && state.isStreaming) {
-    connectViewer(id, { force: true });
+    connectViewer(id);
   }
 });
 
