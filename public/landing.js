@@ -48,7 +48,7 @@ function renderRooms(rooms) {
     watchBtn.className = 'btn small primary';
     watchBtn.textContent = 'Watch';
     watchBtn.onclick = () => {
-      const target = `/view.html?room=${encodeURIComponent(room.name)}`;
+      const target = `/view-relay.html?room=${encodeURIComponent(room.name)}`;
       window.location.href = target;
     };
 

@@ -158,7 +158,7 @@ function ensureViewerFrameLoaded() {
   viewerFrame.id = 'selftestViewerFrame';
   viewerFrame.style.cssText = 'width:1px;height:1px;position:absolute;left:-9999px;top:-9999px;';
   viewerFrameLoaded = new Promise((resolve) => {
-    viewerFrame.src = `/view.html?room=${encodeURIComponent(context.roomName)}&name=SelfTestViewer`;
+    viewerFrame.src = `/view-relay.html?room=${encodeURIComponent(context.roomName)}&name=SelfTestViewer`;
     viewerFrame.onload = () => resolve();
   });
   document.body.appendChild(viewerFrame);
@@ -703,7 +703,7 @@ async function testViewerVipBlockedMessage() {
 
   await new Promise((resolve) => {
     viewerFrame.onload = () => resolve();
-    viewerFrame.src = `/view.html?room=${encodeURIComponent(context.roomName)}&name=SelfTestViewer2&v=${Date.now()}`;
+    viewerFrame.src = `/view-relay.html?room=${encodeURIComponent(context.roomName)}&name=SelfTestViewer2&v=${Date.now()}`;
   });
   const secondViewerDoc = await waitForFrameElements(
     viewerFrame,
