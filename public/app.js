@@ -848,6 +848,11 @@ function switchTab(name) {
   tabs[name].classList.add('active');
   contents[name].classList.add('active');
   tabs[name].classList.remove('has-new');
+  const activeLog = contents[name]?.querySelector?.('.chat-log');
+  if (activeLog?.dataset?.pendingScroll === 'true') {
+    activeLog.scrollTop = activeLog.scrollHeight;
+    delete activeLog.dataset.pendingScroll;
+  }
 }
 
 if (tabs.stream) tabs.stream.onclick = () => switchTab('stream');
@@ -2208,9 +2213,21 @@ if (dom.turnSaveBtn) {
 // ======================================================
 // 13. CHAT SYSTEM
 // ======================================================
+function isChatLogVisible(log) {
+  if (!log) return false;
+  const container = log.closest('.tab-content');
+  if (container) return container.classList.contains('active');
+  return log.offsetParent !== null;
+}
+
+function shouldAutoScroll(log) {
+  return log.scrollHeight - log.scrollTop <= log.clientHeight + 20;
+}
+
 function appendChat(log, name, text, ts) {
   if (!log) return;
 
+  const shouldScroll = shouldAutoScroll(log) || !isChatLogVisible(log);
   const d = document.createElement('div');
   d.className = 'chat-line';
 
@@ -2226,7 +2243,13 @@ function appendChat(log, name, text, ts) {
   d.appendChild(document.createTextNode(`: ${text}`));
 
   log.appendChild(d);
-  log.scrollTop = log.scrollHeight;
+  if (shouldScroll) {
+    if (isChatLogVisible(log)) {
+      log.scrollTop = log.scrollHeight;
+    } else {
+      log.dataset.pendingScroll = 'true';
+    }
+  }
 }
 
 function sendPublic() {
@@ -2300,16 +2323,24 @@ socket.on('private-chat', (d) => {
 
 if (dom.emojiStripPublic) {
   dom.emojiStripPublic.onclick = (e) => {
-    if (e.target.classList.contains('emoji')) {
-      if (dom.inputPublic) dom.inputPublic.value += e.target.textContent;
+    const emoji = e.target.closest?.('.emoji');
+    if (emoji) {
+      if (dom.inputPublic) {
+        dom.inputPublic.value += emoji.textContent;
+        dom.inputPublic.focus();
+      }
     }
   };
 }
 
 if (dom.emojiStripPrivate) {
   dom.emojiStripPrivate.onclick = (e) => {
-    if (e.target.classList.contains('emoji')) {
-      if (dom.inputPrivate) dom.inputPrivate.value += e.target.textContent;
+    const emoji = e.target.closest?.('.emoji');
+    if (emoji) {
+      if (dom.inputPrivate) {
+        dom.inputPrivate.value += emoji.textContent;
+        dom.inputPrivate.focus();
+      }
     }
   };
 }
