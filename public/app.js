@@ -1655,7 +1655,7 @@ function generateQR(url) {
 
 function updateLink(roomSlug) {
   const url = new URL(window.location.href);
-  url.pathname = url.pathname.replace('index.html', '') + 'view.html';
+  url.pathname = url.pathname.replace('index.html', '') + 'view-relay.html';
   url.search = `?room=${encodeURIComponent(roomSlug)}`;
   const finalUrl = url.toString();
 
