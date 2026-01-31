@@ -458,10 +458,24 @@ socket.on("call-end", handleCallEnd);
 // ======================================================
 // 4. CHAT + SYSTEM MESSAGES
 // ======================================================
+const MAX_CHAT_LINES = 200;
+
+function shouldAutoScroll(log) {
+  return log.scrollHeight - log.scrollTop <= log.clientHeight + 20;
+}
+
+function trimChatLog(log) {
+  if (!log) return;
+  while (log.children.length > MAX_CHAT_LINES) {
+    log.removeChild(log.firstChild);
+  }
+}
+
 function appendChat(name, text) {
   const log = $('chatLog');
   if (!log) return;
 
+  const shouldScroll = shouldAutoScroll(log);
   const div = document.createElement('div');
   div.className = 'chat-line';
 
@@ -474,7 +488,10 @@ function appendChat(name, text) {
   div.appendChild(strong);
   div.appendChild(span);
   log.appendChild(div);
-  log.scrollTop = log.scrollHeight;
+  trimChatLog(log);
+  if (shouldScroll) {
+    log.scrollTop = log.scrollHeight;
+  }
 }
 
 function getFriendlyVipMessage(error, hasCode) {
@@ -704,8 +721,9 @@ window.addEventListener('load', () => {
   const emojiStrip = $('emojiStrip');
   if (emojiStrip && chatInput) {
     emojiStrip.onclick = (e) => {
-      if (e.target.classList.contains('emoji')) {
-        chatInput.value += e.target.textContent;
+      const emoji = e.target.closest?.('.emoji');
+      if (emoji) {
+        chatInput.value += emoji.textContent;
         chatInput.focus();
       }
     };
