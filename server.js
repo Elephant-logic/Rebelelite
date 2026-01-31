@@ -263,6 +263,229 @@ function broadcastRoomUpdate(roomName) {
   });
 }
 
+/**
+ * RELAY TREE MANAGER - Capacity-Based Routing & Self-Healing
+ */
+class TreeManager {
+  constructor() {
+    this.trees = new Map();
+  }
+
+  hasRoom(roomName) {
+    return this.trees.has(roomName);
+  }
+
+  hasNode(roomName, socketId) {
+    const tree = this.trees.get(roomName);
+    return !!(tree && tree.nodes.has(socketId));
+  }
+
+  initializeRoom(roomName, hostSocketId) {
+    if (!roomName || !hostSocketId) return null;
+    if (this.trees.has(roomName)) return this.trees.get(roomName);
+
+    const tree = {
+      host: hostSocketId,
+      nodes: new Map(),
+      orphans: new Set()
+    };
+
+    tree.nodes.set(hostSocketId, {
+      socketId: hostSocketId,
+      type: 'host',
+      capacity: 10,
+      children: new Set(),
+      parent: null,
+      tier: 0,
+      lastSeen: Date.now()
+    });
+
+    this.trees.set(roomName, tree);
+    return tree;
+  }
+
+  calculateCapacity(deviceInfo) {
+    const { isMobile, connection, bandwidth } = deviceInfo || {};
+
+    if (isMobile) return 0;
+    if (connection === 'cellular' || connection === '3g' || connection === '2g') return 0;
+    if (connection === 'ethernet' || (bandwidth && bandwidth > 10000)) return 10;
+    if (connection === '4g' || connection === 'wifi') {
+      if (bandwidth && bandwidth > 5000) return 5;
+      return 2;
+    }
+
+    return 3;
+  }
+
+  findBestParent(roomName) {
+    const tree = this.trees.get(roomName);
+    if (!tree) return null;
+
+    let bestParent = null;
+    let bestScore = -Infinity;
+
+    tree.nodes.forEach((node) => {
+      const availableSlots = node.capacity - node.children.size;
+
+      if (availableSlots <= 0) return;
+      if (node.tier >= 3) return;
+
+      const score = (1000 - node.tier * 100) + (availableSlots * 10);
+      if (score > bestScore) {
+        bestScore = score;
+        bestParent = node;
+      }
+    });
+
+    return bestParent;
+  }
+
+  addViewer(roomName, viewerSocketId, deviceInfo) {
+    const tree = this.trees.get(roomName);
+    if (!tree) return null;
+
+    const capacity = this.calculateCapacity(deviceInfo);
+    const parent = this.findBestParent(roomName);
+
+    if (!parent) return null;
+
+    const viewerNode = {
+      socketId: viewerSocketId,
+      type: 'viewer',
+      capacity,
+      children: new Set(),
+      parent: parent.socketId,
+      tier: parent.tier + 1,
+      lastSeen: Date.now(),
+      deviceInfo
+    };
+
+    tree.nodes.set(viewerSocketId, viewerNode);
+    parent.children.add(viewerSocketId);
+
+    return {
+      parentId: parent.socketId,
+      tier: viewerNode.tier,
+      capacity
+    };
+  }
+
+  removeViewer(roomName, viewerSocketId) {
+    const tree = this.trees.get(roomName);
+    if (!tree) return { orphans: [] };
+
+    const node = tree.nodes.get(viewerSocketId);
+    if (!node) return { orphans: [] };
+
+    const orphans = Array.from(node.children);
+
+    if (node.parent) {
+      const parent = tree.nodes.get(node.parent);
+      if (parent) parent.children.delete(viewerSocketId);
+    }
+
+    tree.nodes.delete(viewerSocketId);
+
+    return {
+      orphans,
+      parentId: node.parent,
+      tier: node.tier
+    };
+  }
+
+  reassignOrphans(roomName, orphans) {
+    const assignments = [];
+
+    orphans.forEach((orphanId) => {
+      const tree = this.trees.get(roomName);
+      if (!tree) return;
+
+      const orphanNode = tree.nodes.get(orphanId);
+      if (!orphanNode) return;
+
+      const newParent = this.findBestParent(roomName);
+      if (newParent) {
+        orphanNode.parent = newParent.socketId;
+        orphanNode.tier = newParent.tier + 1;
+        newParent.children.add(orphanId);
+
+        assignments.push({
+          childId: orphanId,
+          newParentId: newParent.socketId,
+          tier: orphanNode.tier
+        });
+      } else {
+        tree.orphans.add(orphanId);
+      }
+    });
+
+    return assignments;
+  }
+
+  getTreeStats(roomName) {
+    const tree = this.trees.get(roomName);
+    if (!tree) return null;
+
+    const stats = {
+      totalNodes: tree.nodes.size,
+      totalOrphans: tree.orphans.size,
+      tiers: {},
+      capacityUsage: {},
+      avgTier: 0
+    };
+
+    let totalTier = 0;
+
+    tree.nodes.forEach((node, socketId) => {
+      stats.tiers[node.tier] = (stats.tiers[node.tier] || 0) + 1;
+      totalTier += node.tier;
+
+      const usage = node.capacity > 0
+        ? Math.round((node.children.size / node.capacity) * 100)
+        : 0;
+
+      stats.capacityUsage[socketId] = {
+        used: node.children.size,
+        total: node.capacity,
+        percentage: usage,
+        tier: node.tier
+      };
+    });
+
+    stats.avgTier = stats.totalNodes > 0 ? (totalTier / stats.totalNodes).toFixed(2) : 0;
+
+    return stats;
+  }
+
+  exportTree(roomName) {
+    const tree = this.trees.get(roomName);
+    if (!tree) return null;
+
+    const buildNode = (socketId) => {
+      const node = tree.nodes.get(socketId);
+      if (!node) return null;
+
+      return {
+        id: socketId.substring(0, 8),
+        type: node.type,
+        tier: node.tier,
+        capacity: node.capacity,
+        childCount: node.children.size,
+        children: Array.from(node.children).map((childId) => buildNode(childId)).filter(Boolean)
+      };
+    };
+
+    return buildNode(tree.host);
+  }
+
+  destroyRoom(roomName) {
+    this.trees.delete(roomName);
+  }
+}
+
+const treeManager = new TreeManager();
+
 // Relay helper to keep signaling logic centralized (no behavior changes).
 function relayToTarget(eventName, targetId, payload) {
   if (targetId) io.to(targetId).emit(eventName, payload);
@@ -811,6 +1034,10 @@ io.on('connection', (socket) => {
       streamTitle: info.streamTitle
     });
 
+    if (isHost) {
+      treeManager.initializeRoom(roomName, socket.id);
+    }
+
     socket.to(roomName).emit('user-joined', { id: socket.id, name: displayName });
     broadcastRoomUpdate(roomName);
     const response = { ok: true, isVip, isHost };
@@ -828,6 +1055,73 @@ io.on('connection', (socket) => {
         io.to(hostId).emit('vip-codes-updated', listVipCodes(directoryEntry));
       }
     }
+  });
+
+  // ======================================================
+  // RELAY VIEWER JOIN (tree-based relay)
+  // ======================================================
+  socket.on('join-room-relay', ({ room, name, deviceInfo } = {}) => {
+    if (!room || typeof room !== 'string') {
+      socket.emit('error-message', 'Invalid room');
+      return;
+    }
+
+    const roomName = normalizeRoomName(room);
+    if (!roomName) {
+      socket.emit('error-message', 'Invalid room');
+      return;
+    }
+
+    const info = getRoomInfo(roomName);
+    if (!info || !info.ownerId) {
+      socket.emit('error-message', 'Room not found');
+      return;
+    }
+
+    treeManager.initializeRoom(roomName, info.ownerId);
+
+    const assignment = treeManager.addViewer(roomName, socket.id, deviceInfo);
+    if (!assignment) {
+      socket.emit('error-message', 'No available relay slots. Tree may be too deep or full.');
+      return;
+    }
+
+    const displayName = (name && String(name).trim().slice(0, 30)) || `Viewer-${socket.id.slice(0, 4)}`;
+
+    socket.join(roomName);
+    socket.data.room = roomName;
+    socket.data.name = displayName;
+    socket.data.isViewer = true;
+    socket.data.isRelayViewer = true;
+    socket.data.roomRole = 'viewer';
+
+    info.users.set(socket.id, {
+      name: displayName,
+      isViewer: true,
+      requestingCall: false,
+      isVip: false
+    });
+
+    const directoryEntry = getRoomDirectoryEntry(roomName);
+    if (directoryEntry) {
+      updateRoomRecord(roomName, (storedRoom) => {
+        storedRoom.viewers = Math.max(0, (storedRoom.viewers || 0) + 1);
+      });
+    }
+
+    socket.emit('parent-assigned', {
+      parentId: assignment.parentId,
+      tier: assignment.tier,
+      capacity: assignment.capacity
+    });
+
+    io.to(assignment.parentId).emit('child-connecting', {
+      childId: socket.id,
+      childName: displayName
+    });
+
+    const stats = treeManager.getTreeStats(roomName);
+    io.to(roomName).emit('tree-stats', stats);
   });
 
   // Viewer "raise hand" request (host receives a prompt)
@@ -922,6 +1216,19 @@ io.on('connection', (socket) => {
   });
 
   // ======================================================
+  // RELAY SIGNALING (viewer <-> parent/children)
+  // ======================================================
+  socket.on('relay-offer', ({ to, offer }) => {
+    if (to && offer) relayToTarget('relay-offer', to, { from: socket.id, offer });
+  });
+  socket.on('relay-answer', ({ to, answer }) => {
+    if (to && answer) relayToTarget('relay-answer', to, { from: socket.id, answer });
+  });
+  socket.on('relay-ice', ({ to, candidate, forParent }) => {
+    if (to && candidate) relayToTarget('relay-ice', to, { from: socket.id, candidate, forParent: !!forParent });
+  });
+
+  // ======================================================
   // CALL SIGNALING (host <-> viewer 1:1)
   // ======================================================
   socket.on('ring-user', (targetId) => {
@@ -1002,6 +1309,21 @@ io.on('connection', (socket) => {
           storedRoom.isLive = false;
         });
       }
+
+      treeManager.destroyRoom(roomName);
+    }
+
+    if (treeManager.hasNode(roomName, socket.id)) {
+      const { orphans } = treeManager.removeViewer(roomName, socket.id);
+      if (orphans.length > 0) {
+        const assignments = treeManager.reassignOrphans(roomName, orphans);
+        assignments.forEach(({ childId, newParentId, tier }) => {
+          io.to(childId).emit('parent-changed', { newParentId, tier });
+          io.to(newParentId).emit('child-connecting', { childId });
+        });
+      }
+      const stats = treeManager.getTreeStats(roomName);
+      if (stats) io.to(roomName).emit('tree-stats', stats);
     }
 
     socket.to(roomName).emit('user-left', { id: socket.id });
