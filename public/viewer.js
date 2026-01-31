@@ -19,6 +19,7 @@
 // 6) PeerConnection connects and stream is displayed.
 
 const $ = id => document.getElementById(id);
+const DEBUG_SIGNAL = window.DEBUG_SIGNAL === true;
 const socket = io({ autoConnect: false });
 
 function getRtcConfig() {
@@ -651,9 +652,17 @@ window.addEventListener('load', () => {
 
   const roomInfoPromise = hydrateRoomInfo(room);
 
-  const completeJoin = (vipToken) => {
+  const completeJoin = async (vipToken) => {
     const codeValue = vipToken ? '' : vipInput?.value.trim();
-    if (!socket.connected) socket.connect();
+    await ensureSocketConnected();
+    let responseHandled = false;
+    const timeoutId = setTimeout(() => {
+      if (responseHandled) return;
+      responseHandled = true;
+      if (joinStatus) {
+        joinStatus.textContent = 'Unable to reach the room. Please try again.';
+      }
+    }, 6000);
     socket.emit(
       'join-room',
       {
@@ -664,22 +673,23 @@ window.addEventListener('load', () => {
         vipCode: codeValue
       },
       (resp) => {
+        if (responseHandled) return;
+        responseHandled = true;
+        clearTimeout(timeoutId);
         if (resp?.ok) {
           finalizeViewerJoin();
           fetchRoomConfig(state.currentRoom);
-        } else {
-          if (joinStatus) {
-            const errorText = resp?.error || '';
-            const hasVipCode = !!codeValue;
-            const vipMessage =
-              state.roomPrivacy === 'private' && state.vipRequired
-                ? getFriendlyVipMessage(errorText, hasVipCode)
-                : '';
-            joinStatus.textContent = vipMessage || errorText || 'Unable to join room.';
-          }
+        } else if (joinStatus) {
+          const errorText = resp?.error || '';
+          const hasVipCode = !!codeValue;
+          const vipMessage =
+            state.roomPrivacy === 'private' && state.vipRequired
+              ? getFriendlyVipMessage(errorText, hasVipCode)
+              : '';
+          joinStatus.textContent = vipMessage || errorText || 'Unable to join room.';
         }
-      );
-    });
+      }
+    );
   };
 
   const attemptJoin = async () => {
