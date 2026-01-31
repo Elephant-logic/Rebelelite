@@ -19,7 +19,8 @@
 // 6) PeerConnection connects and stream is displayed.
 
 const $ = id => document.getElementById(id);
-const socket = io({ autoConnect: false });
+const DEBUG_SIGNAL = window.DEBUG_SIGNAL === true;
+const socket = io({ autoConnect: true });
 
 function getRtcConfig() {
   return { iceServers: getIceServers(state.turnConfig) };
@@ -557,16 +558,32 @@ function emitWithAck(eventName, payload) {
   });
 }
 
-function ensureSocketConnected() {
-  if (socket.connected) return Promise.resolve();
+function ensureSocketConnected({ timeoutMs = 6000 } = {}) {
+  if (socket.connected) return Promise.resolve(true);
   return new Promise((resolve) => {
-    socket.once('connect', resolve);
+    let settled = false;
+    const finish = (ok) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timerId);
+      socket.off('connect', handleConnect);
+      socket.off('connect_error', handleError);
+      resolve(ok);
+    };
+    const handleConnect = () => finish(true);
+    const handleError = () => finish(false);
+    const timerId = setTimeout(() => finish(false), timeoutMs);
+    socket.once('connect', handleConnect);
+    socket.once('connect_error', handleError);
     socket.connect();
   });
 }
 
 async function hydrateRoomInfo(roomName) {
-  await ensureSocketConnected();
+  const connected = await ensureSocketConnected();
+  if (!connected) {
+    return;
+  }
   const info = await emitWithAck('get-room-info', { roomName });
   if (info?.privacy) {
     state.roomPrivacy = info.privacy;
@@ -617,7 +634,10 @@ function applyTurnConfig(config) {
 }
 
 async function fetchRoomConfig(roomName) {
-  await ensureSocketConnected();
+  const connected = await ensureSocketConnected();
+  if (!connected) {
+    return;
+  }
   const config = await emitWithAck('get-room-config', { roomName });
   if (config?.ok) {
     applyPaymentConfig(config);
@@ -648,12 +668,34 @@ window.addEventListener('load', () => {
   const joinBtn = $('joinRoomBtn');
   const joinStatus = $('joinStatus');
   let activeVipToken = vipTokenParam ? vipTokenParam.trim() : '';
+  let triedVipTokenFallback = false;
 
   const roomInfoPromise = hydrateRoomInfo(room);
 
-  const completeJoin = (vipToken) => {
+  socket.on('connect_error', () => {
+    if (state.joined) return;
+    if (joinStatus) {
+      joinStatus.textContent = 'Unable to connect. Please try again.';
+    }
+  });
+
+  const completeJoin = async (vipToken) => {
     const codeValue = vipToken ? '' : vipInput?.value.trim();
-    if (!socket.connected) socket.connect();
+    const connected = await ensureSocketConnected();
+    if (!connected) {
+      if (joinStatus) {
+        joinStatus.textContent = 'Unable to connect. Please try again.';
+      }
+      return;
+    }
+    let responseHandled = false;
+    const timeoutId = setTimeout(() => {
+      if (responseHandled) return;
+      responseHandled = true;
+      if (joinStatus) {
+        joinStatus.textContent = 'Unable to reach the room. Please try again.';
+      }
+    }, 6000);
     socket.emit(
       'join-room',
       {
@@ -664,22 +706,32 @@ window.addEventListener('load', () => {
         vipCode: codeValue
       },
       (resp) => {
+        if (responseHandled) return;
+        responseHandled = true;
+        clearTimeout(timeoutId);
         if (resp?.ok) {
           finalizeViewerJoin();
           fetchRoomConfig(state.currentRoom);
         } else {
-          if (joinStatus) {
-            const errorText = resp?.error || '';
-            const hasVipCode = !!codeValue;
-            const vipMessage =
-              state.roomPrivacy === 'private' && state.vipRequired
-                ? getFriendlyVipMessage(errorText, hasVipCode)
-                : '';
-            joinStatus.textContent = vipMessage || errorText || 'Unable to join room.';
+          if (vipToken && !triedVipTokenFallback) {
+            triedVipTokenFallback = true;
+            activeVipToken = '';
+            if (vipInput?.value?.trim()) {
+              completeJoin('');
+              return;
+            }
           }
+          if (!joinStatus) return;
+          const errorText = resp?.error || '';
+          const hasVipCode = !!codeValue;
+          const vipMessage =
+            state.roomPrivacy === 'private' && state.vipRequired
+              ? getFriendlyVipMessage(errorText, hasVipCode)
+              : '';
+          joinStatus.textContent = vipMessage || errorText || 'Unable to join room.';
         }
-      );
-    });
+      }
+    );
   };
 
   const attemptJoin = async () => {
