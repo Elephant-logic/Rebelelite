@@ -2218,8 +2218,6 @@ if (dom.turnSaveBtn) {
 // ======================================================
 // 13. CHAT SYSTEM
 // ======================================================
-const MAX_CHAT_LINES = 200;
-
 function isChatLogVisible(log) {
   if (!log) return false;
   const container = log.closest('.tab-content');
@@ -2229,13 +2227,6 @@ function isChatLogVisible(log) {
 
 function shouldAutoScroll(log) {
   return log.scrollHeight - log.scrollTop <= log.clientHeight + 20;
-}
-
-function trimChatLog(log) {
-  if (!log) return;
-  while (log.children.length > MAX_CHAT_LINES) {
-    log.removeChild(log.firstChild);
-  }
 }
 
 function appendChat(log, name, text, ts) {
@@ -2257,7 +2248,6 @@ function appendChat(log, name, text, ts) {
   d.appendChild(document.createTextNode(`: ${text}`));
 
   log.appendChild(d);
-  trimChatLog(log);
   if (shouldScroll) {
     if (isChatLogVisible(log)) {
       log.scrollTop = log.scrollHeight;
