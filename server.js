@@ -1,295 +1,37 @@
-const path = require('path');
+/**
+ * REBEL STREAM - DECENTRALIZED RELAY SERVER
+ * Complete server implementation with tree-based P2P relay network
+ */
+
 const express = require('express');
-const http = require('http');
-const { Server } = require('socket.io');
-
-const PORT = process.env.PORT || 9100;
-
 const app = express();
-const server = http.createServer(app);
-
-// Increased buffer to 50MB for large arcade transfers
-const io = new Server(server, {
-  cors: { origin: '*' },
-  maxHttpBufferSize: 5e7,
-  pingTimeout: 10000,
-  pingInterval: 25000
+const http = require('http').createServer(app);
+const io = require('socket.io')(http, {
+  cors: {
+    origin: '*',
+    methods: ['GET', 'POST']
+  }
 });
 
-app.get('/', (req, res) => {
-  res.sendFile(path.join(__dirname, 'public', 'landing.html'));
-});
-
-app.get('/selftest', (req, res) => {
-  res.sendFile(path.join(__dirname, 'public', 'selftest.html'));
-});
-
-app.use(express.static(path.join(__dirname, 'public')));
-
-// In-memory room state (per room: owner, lock state, users)
-const rooms = Object.create(null);
-const vipTokens = new Map();
-
-// Persistent room registry (in-memory for now, structured for easy DB swap).
-const roomDirectory = {
-  rooms: Object.create(null)
-};
-
-function normalizeRoomName(roomName) {
-  if (!roomName || typeof roomName !== 'string') return '';
-  return roomName.trim().slice(0, 50);
-}
-
-function normalizeVipCode(value) {
-  if (!value || typeof value !== 'string') return '';
-  return value.trim().toUpperCase();
-}
-
-function buildRoomRecord({ roomName, ownerPassword, privacy }) {
-  return {
-    roomName,
-    ownerPassword: ownerPassword ? String(ownerPassword) : null,
-    privacy: privacy === 'private' ? 'private' : 'public',
-    isLive: false,
-    vipRequired: false,
-    vipCodes: {},
-    createdAt: Date.now(),
-    title: null,
-    viewers: 0,
-    vipUsers: [],
-    paymentEnabled: false,
-    paymentLabel: '',
-    paymentUrl: '',
-    turnConfig: {
-      enabled: false,
-      host: '',
-      port: '',
-      tlsPort: '',
-      username: '',
-      password: ''
-    }
-  };
-}
-
-function getRoomRecord(roomName) {
-  const name = normalizeRoomName(roomName);
-  if (!name) return null;
-  return roomDirectory.rooms[name] || null;
-}
-
-function createRoomRecord({ roomName, ownerPassword, privacy }) {
-  const name = normalizeRoomName(roomName);
-  if (!name) return { ok: false, error: 'Invalid room name.' };
-  if (roomDirectory.rooms[name]) return { ok: false, error: 'Room already exists.' };
-  const record = buildRoomRecord({ roomName: name, ownerPassword, privacy });
-  roomDirectory.rooms[name] = record;
-  return { ok: true, room: record };
-}
-
-function updateRoomRecord(roomName, updater) {
-  const name = normalizeRoomName(roomName);
-  if (!name) return { ok: false, error: 'Invalid room name.' };
-  const existing = roomDirectory.rooms[name];
-  if (!existing) return { ok: false, error: 'Room not found.' };
-  updater(existing);
-  return { ok: true, room: existing };
-}
-
-function listPublicRooms() {
-  return Object.values(roomDirectory.rooms)
-    .filter((room) => room.privacy === 'public' && room.isLive)
-    .map((room) => ({
-      name: room.roomName,
-      viewers: typeof room.viewers === 'number' ? room.viewers : 0,
-      title: room.title || null,
-      live: !!room.isLive
-    }));
-}
-
-function getRoomDirectoryEntry(roomName) {
-  return getRoomRecord(roomName);
-}
-
-function getRoomInfo(roomName) {
-  if (!rooms[roomName]) {
-    rooms[roomName] = {
-      ownerId: null,
-      locked: false,
-      streamTitle: 'Untitled Stream',
-      users: new Map()
-    };
-  }
-  return rooms[roomName];
-}
-
-function listVipCodes(record) {
-  if (!record || !record.vipCodes) return [];
-  return Object.entries(record.vipCodes).map(([code, meta]) => ({
-    code,
-    maxUses: meta.maxUses,
-    usesLeft: meta.usesLeft,
-    used: Math.max(0, meta.maxUses - meta.usesLeft)
-  }));
-}
-
-function emitVipCodesUpdate(roomName) {
-  const info = rooms[roomName];
-  if (!info || !info.ownerId) return;
-  const record = getRoomRecord(roomName);
-  if (!record) return;
-  io.to(info.ownerId).emit('vip-codes-updated', listVipCodes(record));
-}
-
-function isRoomClaimed(roomName) {
-  const record = getRoomRecord(roomName);
-  return !!record;
-}
-
-function issueVipToken(roomName) {
-  const token = `${roomName}-${Math.random().toString(36).slice(2, 10)}-${Date.now()}`;
-  vipTokens.set(token, { roomName, created: Date.now() });
-  return token;
-}
-
-function consumeVipToken(token, roomName) {
-  if (!token || !vipTokens.has(token)) return false;
-  const data = vipTokens.get(token);
-  if (!data || data.roomName !== roomName) return false;
-  if (Date.now() - data.created > 15 * 60 * 1000) {
-    vipTokens.delete(token);
-    return false;
-  }
-  vipTokens.delete(token);
-  return true;
-}
-
-function requireRoom(socket) {
-  return socket.data.room || null;
-}
-
-function requireOwner(info, socket) {
-  return info && info.ownerId === socket.id;
-}
-
-function buildUserList(room) {
-  const users = [];
-  for (const [id, u] of room.users.entries()) {
-    users.push({
-      id,
-      name: u.name,
-      isViewer: u.isViewer,
-      requestingCall: u.requestingCall,
-      isVip: u.isVip
-    });
-  }
-  return users;
-}
-
-function generateVipCode(length = 6) {
-  const chars = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
-  let output = '';
-  for (let i = 0; i < length; i += 1) {
-    output += chars.charAt(Math.floor(Math.random() * chars.length));
-  }
-  return output;
-}
-
-function normalizePaymentLabel(value) {
-  if (!value || typeof value !== 'string') return '';
-  return value.trim().slice(0, 80);
-}
-
-function normalizePaymentUrl(value) {
-  if (!value || typeof value !== 'string') return '';
-  return value.trim().slice(0, 500);
-}
-
-function isValidPaymentUrl(value) {
-  return typeof value === 'string' && (value.startsWith('http://') || value.startsWith('https://'));
-}
-
-function normalizeTurnConfig(config = {}) {
-  const enabled = !!config.enabled;
-  const host = typeof config.host === 'string' ? config.host.trim() : '';
-  const port = Number(config.port);
-  const tlsPort = config.tlsPort ? Number(config.tlsPort) : '';
-  const username = typeof config.username === 'string' ? config.username.trim() : '';
-  const password = typeof config.password === 'string' ? config.password.trim() : '';
-  return {
-    enabled,
-    host,
-    port: Number.isFinite(port) ? port : '',
-    tlsPort: Number.isFinite(tlsPort) ? tlsPort : '',
-    username,
-    password
-  };
-}
-
-function isValidTurnConfig(config) {
-  if (!config || !config.enabled) return false;
-  if (!config.host || !config.port) return false;
-  if (!config.username || !config.password) return false;
-  return true;
-}
-
-function sanitizeTurnConfig(config) {
-  const normalized = normalizeTurnConfig(config);
-  if (!normalized.enabled) {
-    return {
-      enabled: false,
-      host: '',
-      port: '',
-      tlsPort: '',
-      username: '',
-      password: ''
-    };
-  }
-  if (!isValidTurnConfig(normalized)) return null;
-  return normalized;
-}
-
-function broadcastRoomUpdate(roomName) {
-  const room = rooms[roomName];
-  if (!room) return;
-  const record = getRoomRecord(roomName);
-
-  io.to(roomName).emit('room-update', {
-    users: buildUserList(room),
-    ownerId: room.ownerId,
-    locked: room.locked,
-    streamTitle: room.streamTitle,
-    privacy: record ? record.privacy : 'public',
-    vipRequired: record ? !!record.vipRequired : false
-  });
-}
+// Serve static files
+app.use(express.static('public'));
+app.use(express.json());
 
 /**
- * RELAY TREE MANAGER - Capacity-Based Routing & Self-Healing
+ * TREE MANAGER - Capacity-Based Routing & Self-Healing
  */
 class TreeManager {
   constructor() {
-    this.trees = new Map();
-  }
-
-  hasRoom(roomName) {
-    return this.trees.has(roomName);
-  }
-
-  hasNode(roomName, socketId) {
-    const tree = this.trees.get(roomName);
-    return !!(tree && tree.nodes.has(socketId));
+    this.trees = new Map(); // roomName -> tree structure
   }
 
   initializeRoom(roomName, hostSocketId) {
-    if (!roomName || !hostSocketId) return null;
-    if (this.trees.has(roomName)) return this.trees.get(roomName);
-
     const tree = {
       host: hostSocketId,
       nodes: new Map(),
       orphans: new Set()
     };
-
+    
     tree.nodes.set(hostSocketId, {
       socketId: hostSocketId,
       type: 'host',
@@ -299,22 +41,39 @@ class TreeManager {
       tier: 0,
       lastSeen: Date.now()
     });
-
+    
     this.trees.set(roomName, tree);
+    console.log(`[Tree] Initialized room: ${roomName}`);
     return tree;
   }
 
   calculateCapacity(deviceInfo) {
     const { isMobile, connection, bandwidth } = deviceInfo || {};
-
-    if (isMobile) return 0;
-    if (connection === 'cellular' || connection === '3g' || connection === '2g') return 0;
-    if (connection === 'ethernet' || (bandwidth && bandwidth > 10000)) return 10;
+    
+    // Mobile devices: no relay capacity
+    if (isMobile) {
+      return 0;
+    }
+    
+    // Cellular connections
+    if (connection === 'cellular' || connection === '3g' || connection === '2g') {
+      return 0;
+    }
+    
+    // High-speed connections
+    if (connection === 'ethernet' || (bandwidth && bandwidth > 10000)) {
+      return 10;
+    }
+    
+    // Medium-speed (WiFi, 4G)
     if (connection === '4g' || connection === 'wifi') {
-      if (bandwidth && bandwidth > 5000) return 5;
+      if (bandwidth && bandwidth > 5000) {
+        return 5;
+      }
       return 2;
     }
-
+    
+    // Default for unknown
     return 3;
   }
 
@@ -327,11 +86,16 @@ class TreeManager {
 
     tree.nodes.forEach((node) => {
       const availableSlots = node.capacity - node.children.size;
-
+      
+      // Skip nodes with no capacity
       if (availableSlots <= 0) return;
+      
+      // Prevent trees from getting too deep (max tier 3)
       if (node.tier >= 3) return;
-
+      
+      // Scoring: Prefer lower tiers, then more free slots
       const score = (1000 - node.tier * 100) + (availableSlots * 10);
+      
       if (score > bestScore) {
         bestScore = score;
         bestParent = node;
@@ -343,12 +107,18 @@ class TreeManager {
 
   addViewer(roomName, viewerSocketId, deviceInfo) {
     const tree = this.trees.get(roomName);
-    if (!tree) return null;
+    if (!tree) {
+      console.error(`[Tree] Room not found: ${roomName}`);
+      return null;
+    }
 
     const capacity = this.calculateCapacity(deviceInfo);
     const parent = this.findBestParent(roomName);
 
-    if (!parent) return null;
+    if (!parent) {
+      console.error(`[Tree] No available parent in ${roomName}`);
+      return null;
+    }
 
     const viewerNode = {
       socketId: viewerSocketId,
@@ -363,6 +133,8 @@ class TreeManager {
 
     tree.nodes.set(viewerSocketId, viewerNode);
     parent.children.add(viewerSocketId);
+
+    console.log(`[Tree] Added ${viewerSocketId} as child of ${parent.socketId} (Tier ${viewerNode.tier}, Capacity ${capacity})`);
 
     return {
       parentId: parent.socketId,
@@ -379,13 +151,17 @@ class TreeManager {
     if (!node) return { orphans: [] };
 
     const orphans = Array.from(node.children);
-
+    
     if (node.parent) {
       const parent = tree.nodes.get(node.parent);
-      if (parent) parent.children.delete(viewerSocketId);
+      if (parent) {
+        parent.children.delete(viewerSocketId);
+      }
     }
 
     tree.nodes.delete(viewerSocketId);
+
+    console.log(`[Tree] Removed ${viewerSocketId}, orphaned ${orphans.length} children`);
 
     return {
       orphans,
@@ -397,7 +173,7 @@ class TreeManager {
   reassignOrphans(roomName, orphans) {
     const assignments = [];
 
-    orphans.forEach((orphanId) => {
+    orphans.forEach(orphanId => {
       const tree = this.trees.get(roomName);
       if (!tree) return;
 
@@ -405,6 +181,7 @@ class TreeManager {
       if (!orphanNode) return;
 
       const newParent = this.findBestParent(roomName);
+      
       if (newParent) {
         orphanNode.parent = newParent.socketId;
         orphanNode.tier = newParent.tier + 1;
@@ -415,7 +192,10 @@ class TreeManager {
           newParentId: newParent.socketId,
           tier: orphanNode.tier
         });
+
+        console.log(`[Tree] Reassigned ${orphanId} to ${newParent.socketId} (Tier ${orphanNode.tier})`);
       } else {
+        console.error(`[Tree] Could not reassign orphan ${orphanId}`);
         tree.orphans.add(orphanId);
       }
     });
@@ -441,8 +221,8 @@ class TreeManager {
       stats.tiers[node.tier] = (stats.tiers[node.tier] || 0) + 1;
       totalTier += node.tier;
 
-      const usage = node.capacity > 0
-        ? Math.round((node.children.size / node.capacity) * 100)
+      const usage = node.capacity > 0 
+        ? Math.round((node.children.size / node.capacity) * 100) 
         : 0;
 
       stats.capacityUsage[socketId] = {
@@ -472,7 +252,7 @@ class TreeManager {
         tier: node.tier,
         capacity: node.capacity,
         childCount: node.children.size,
-        children: Array.from(node.children).map((childId) => buildNode(childId)).filter(Boolean)
+        children: Array.from(node.children).map(childId => buildNode(childId)).filter(Boolean)
       };
     };
 
@@ -481,857 +261,453 @@ class TreeManager {
 
   destroyRoom(roomName) {
     this.trees.delete(roomName);
+    console.log(`[Tree] Destroyed room: ${roomName}`);
   }
 }
 
 const treeManager = new TreeManager();
 
-// Relay helper to keep signaling logic centralized (no behavior changes).
-function relayToTarget(eventName, targetId, payload) {
-  if (targetId) io.to(targetId).emit(eventName, payload);
-}
+/**
+ * ROOM MANAGEMENT
+ */
+const rooms = new Map(); // roomName -> { host, users, claimed, password, settings }
 
+/**
+ * SOCKET.IO EVENT HANDLERS
+ */
 io.on('connection', (socket) => {
-  socket.data.room = null;
-  socket.data.name = null;
+  console.log(`[Socket] Connected: ${socket.id}`);
 
-  socket.on('get-public-rooms', () => {
-    socket.emit('public-rooms', listPublicRooms());
-  });
-
-  socket.on('list-public-rooms', () => {
-    socket.emit('public-rooms', listPublicRooms());
-  });
-
-  socket.on('claim-room', ({ name, password, privacy } = {}, callback) => {
-    const reply = typeof callback === 'function' ? callback : () => {};
-    const roomName = normalizeRoomName(name);
-    if (!roomName || !password) {
-      reply({ ok: false, error: 'Room name and password are required.' });
+  // ===== ROOM CREATION & CLAIMING =====
+  
+  socket.on('claim-room', ({ name, password, privacy }, callback) => {
+    if (rooms.has(name)) {
+      callback({ ok: false, error: 'Room name already taken' });
       return;
     }
-    const record = getRoomRecord(roomName);
-    if (!record) {
-      const result = createRoomRecord({
-        roomName,
-        ownerPassword: password,
-        privacy
-      });
-      reply(result.ok ? { ok: true } : { ok: false, error: result.error });
-      return;
-    }
-    if (record.ownerPassword) {
-      if (record.ownerPassword !== String(password || '')) {
-        reply({ ok: false, error: 'Invalid room password.' });
-        return;
-      }
-      reply({ ok: true });
-      return;
-    }
-    updateRoomRecord(roomName, (room) => {
-      room.ownerPassword = String(password);
-      room.privacy = privacy === 'private' ? 'private' : 'public';
-    });
-    reply({ ok: true });
-  });
 
-  socket.on('enter-host-room', ({ roomName, password, privacy } = {}, callback) => {
-    const reply = typeof callback === 'function' ? callback : () => {};
-    const normalizedName = normalizeRoomName(roomName);
-    if (!normalizedName) {
-      reply({ ok: false, error: 'Room name is required.' });
-      return;
-    }
-    const record = getRoomRecord(normalizedName);
-    if (!record) {
-      const result = createRoomRecord({
-        roomName: normalizedName,
-        ownerPassword: password || null,
-        privacy: privacy === 'private' ? 'private' : 'public'
-      });
-      if (result.ok && password) {
-        if (!socket.data.hostAuthRooms) socket.data.hostAuthRooms = new Set();
-        socket.data.hostAuthRooms.add(normalizedName);
-      }
-      reply(result.ok ? { ok: true, created: true } : { ok: false, error: result.error });
-      return;
-    }
-    if (record.ownerPassword) {
-      if (record.ownerPassword !== String(password || '')) {
-        reply({ ok: false, error: 'Invalid room password.' });
-        return;
-      }
-      if (!socket.data.hostAuthRooms) socket.data.hostAuthRooms = new Set();
-      socket.data.hostAuthRooms.add(normalizedName);
-    }
-    reply({ ok: true, created: false });
-  });
-
-  socket.on('get-room-info', ({ roomName } = {}, callback) => {
-    const reply = typeof callback === 'function' ? callback : () => {};
-    const record = getRoomRecord(roomName);
-    reply({
-      exists: !!record,
-      privacy: record ? record.privacy : 'public',
-      hasOwnerPassword: !!(record && record.ownerPassword),
-      vipRequired: record ? !!record.vipRequired : false
-    });
-  });
-
-  socket.on('get-room-config', ({ roomName } = {}, callback) => {
-    const reply = typeof callback === 'function' ? callback : () => {};
-    const record = getRoomRecord(roomName);
-    if (!record) {
-      reply({ ok: false, error: 'Room not found.' });
-      return;
-    }
-    reply({
-      ok: true,
-      paymentEnabled: !!record.paymentEnabled,
-      paymentLabel: record.paymentLabel || '',
-      paymentUrl: record.paymentUrl || '',
-      turnConfig: record.turnConfig || {
-        enabled: false,
-        host: '',
-        port: '',
-        tlsPort: '',
-        username: '',
-        password: ''
+    rooms.set(name, {
+      host: socket.id,
+      users: new Map(),
+      claimed: true,
+      password: password,
+      isPublic: privacy === 'public',
+      settings: {
+        streamTitle: '',
+        slug: '',
+        isPrivate: false,
+        allowedGuests: [],
+        vipUsers: [],
+        vipCodes: [],
+        vipRequired: false
       }
     });
+
+    treeManager.initializeRoom(name, socket.id);
+
+    callback({ ok: true });
+    console.log(`[Room] Claimed: ${name} by ${socket.id}`);
   });
 
-  socket.on('check-room-claimed', ({ roomName } = {}, callback) => {
-    const reply = typeof callback === 'function' ? callback : () => {};
-    const record = getRoomRecord(roomName);
-    const claimed = !!record;
-    const hasPassword = !!(record && record.ownerPassword);
-    reply({ claimed, hasPassword });
-  });
-
-  socket.on('auth-host-room', ({ name, roomName, password } = {}, callback) => {
-    const reply = typeof callback === 'function' ? callback : () => {};
-    const targetName = roomName || name;
-    const record = getRoomRecord(targetName);
-    if (!record) {
-      reply({ ok: false, error: 'Room not found.' });
-      return;
-    }
-    if (record.ownerPassword !== String(password || '')) {
-      reply({ ok: false, error: 'Invalid room password.' });
-      return;
-    }
-    if (!socket.data.hostAuthRooms) socket.data.hostAuthRooms = new Set();
-    socket.data.hostAuthRooms.add(record.roomName);
-    reply({ ok: true });
-  });
-
-  socket.on('host-login', ({ name, password } = {}, callback) => {
-    const reply = typeof callback === 'function' ? callback : () => {};
-    const record = getRoomRecord(name);
-    if (!record) {
-      reply({ ok: false, error: 'Room not found.' });
-      return;
-    }
-    if (record.ownerPassword !== String(password || '')) {
-      reply({ ok: false, error: 'Invalid room password.' });
-      return;
-    }
-    reply({ ok: true });
-  });
-
-  socket.on('update-room-privacy', ({ roomName, privacy, name } = {}, callback) => {
-    const reply = typeof callback === 'function' ? callback : () => {};
-    const targetName = roomName || name;
-    if (!targetName || !privacy) {
-      reply({ ok: false, error: 'Room name and privacy are required.' });
-      return;
-    }
-    const normalizedPrivacy = privacy === 'private' ? 'private' : 'public';
-    const result = updateRoomRecord(targetName, (room) => {
-      room.privacy = normalizedPrivacy;
-    });
-    reply(result.ok ? { ok: true } : { ok: false, error: result.error });
-  });
-
-  socket.on('update-vip-required', ({ roomName, vipRequired } = {}, callback) => {
-    const reply = typeof callback === 'function' ? callback : () => {};
-    const targetName = normalizeRoomName(roomName);
-    if (!targetName) {
-      reply({ ok: false, error: 'Room name is required.' });
-      return;
-    }
-    const info = getRoomInfo(targetName);
-    if (!requireOwner(info, socket)) {
-      reply({ ok: false, error: 'Only the host can update VIP requirements.' });
-      return;
-    }
-    const result = updateRoomRecord(targetName, (room) => {
-      room.vipRequired = !!vipRequired;
-    });
-    if (!result.ok) {
-      reply({ ok: false, error: result.error });
-      return;
-    }
-    broadcastRoomUpdate(targetName);
-    reply({ ok: true });
-  });
-
-  socket.on('update-room-live', ({ roomName, name, isLive, live, viewers, title } = {}, callback) => {
-    const reply = typeof callback === 'function' ? callback : () => {};
-    const targetName = roomName || name;
-    if (!targetName) {
-      reply({ ok: false, error: 'Room name is required.' });
-      return;
-    }
-    const result = updateRoomRecord(targetName, (room) => {
-      if (typeof isLive === 'boolean') room.isLive = isLive;
-      if (typeof live === 'boolean') room.isLive = live;
-      if (typeof viewers === 'number' && Number.isFinite(viewers)) {
-        room.viewers = Math.max(0, Math.floor(viewers));
-      }
-      if (typeof title === 'string') {
-        room.title = title.slice(0, 100) || null;
-      }
-    });
-    reply(result.ok ? { ok: true } : { ok: false, error: result.error });
-  });
-
-  socket.on('update-room-payments', ({ roomName, paymentEnabled, paymentLabel, paymentUrl } = {}, callback) => {
-    const reply = typeof callback === 'function' ? callback : () => {};
-    const targetName = normalizeRoomName(roomName);
-    if (!targetName) {
-      reply({ ok: false, error: 'Room name is required.' });
-      return;
-    }
-    const info = rooms[targetName];
-    if (!requireOwner(info, socket)) {
-      reply({ ok: false, error: 'Only the host can update payment settings.' });
-      return;
-    }
-
-    const normalizedLabel = normalizePaymentLabel(paymentLabel);
-    const normalizedUrl = normalizePaymentUrl(paymentUrl);
-    const enabled = !!paymentEnabled;
-
-    if (enabled) {
-      if (!normalizedLabel) {
-        reply({ ok: false, error: 'Payment button label is required.' });
-        return;
-      }
-      if (!normalizedUrl || !isValidPaymentUrl(normalizedUrl)) {
-        reply({ ok: false, error: 'Payment URL must start with http:// or https://.' });
-        return;
-      }
-    }
-
-    const result = updateRoomRecord(targetName, (room) => {
-      room.paymentEnabled = enabled;
-      room.paymentLabel = normalizedLabel;
-      room.paymentUrl = normalizedUrl;
-    });
-
-    reply(result.ok ? { ok: true } : { ok: false, error: result.error });
-  });
-
-  socket.on('update-room-turn', ({ roomName, turnConfig } = {}, callback) => {
-    const reply = typeof callback === 'function' ? callback : () => {};
-    const targetName = normalizeRoomName(roomName);
-    if (!targetName) {
-      reply({ ok: false, error: 'Room name is required.' });
-      return;
-    }
-    const info = rooms[targetName];
-    if (!requireOwner(info, socket)) {
-      reply({ ok: false, error: 'Only the host can update TURN settings.' });
-      return;
-    }
-
-    const sanitized = sanitizeTurnConfig(turnConfig);
-    if (!sanitized) {
-      reply({ ok: false, error: 'TURN host, port, username, and password are required.' });
-      return;
-    }
-
-    const result = updateRoomRecord(targetName, (room) => {
-      room.turnConfig = sanitized;
-    });
-
-    reply(result.ok ? { ok: true } : { ok: false, error: result.error });
-  });
-
-  socket.on('add-vip-user', ({ room, userName } = {}, callback) => {
-    const reply = typeof callback === 'function' ? callback : () => {};
-    const roomName = normalizeRoomName(room);
-    const trimmedName = typeof userName === 'string' ? userName.trim() : '';
-    if (!roomName || !trimmedName) {
-      reply({ ok: false, error: 'Room and username are required.' });
-      return;
-    }
-    const info = getRoomInfo(roomName);
-    if (!requireOwner(info, socket)) {
-      reply({ ok: false, error: 'Only the host can add VIP users.' });
-      return;
-    }
-    const result = updateRoomRecord(roomName, (storedRoom) => {
-      const exists = storedRoom.vipUsers.some(
-        (user) => String(user).trim().toLowerCase() === trimmedName.toLowerCase()
-      );
-      if (!exists) storedRoom.vipUsers.push(trimmedName);
-    });
-    if (!result.ok) {
-      reply({ ok: false, error: result.error });
-      return;
-    }
-    reply({ ok: true });
-  });
-
-  socket.on('generate-vip-code', ({ room, maxUses } = {}, callback) => {
-    const reply = typeof callback === 'function' ? callback : () => {};
-    const roomName = normalizeRoomName(room);
-    if (!roomName) {
-      reply({ ok: false, error: 'Room is required.' });
-      return;
-    }
-    const info = getRoomInfo(roomName);
-    if (!requireOwner(info, socket)) {
-      reply({ ok: false, error: 'Only the host can generate VIP codes.' });
-      return;
-    }
-    const code = generateVipCode(6);
-    const normalizedMaxUses = Number.isFinite(maxUses) ? Math.max(1, Math.floor(maxUses)) : 1;
-    const result = updateRoomRecord(roomName, (storedRoom) => {
-      storedRoom.vipCodes[code] = { maxUses: normalizedMaxUses, usesLeft: normalizedMaxUses };
-    });
-    if (!result.ok) {
-      reply({ ok: false, error: result.error });
-      return;
-    }
-    reply({ ok: true, code, maxUses: normalizedMaxUses, usesLeft: normalizedMaxUses });
-  });
-
-  socket.on('get-vip-codes', ({ roomName, room } = {}, callback) => {
-    const reply = typeof callback === 'function' ? callback : () => {};
-    const targetName = normalizeRoomName(roomName || room);
-    if (!targetName) {
-      reply({ ok: false, error: 'Room is required.' });
-      return;
-    }
-    const info = getRoomInfo(targetName);
-    if (!requireOwner(info, socket)) {
-      reply({ ok: false, error: 'Only the host can view VIP codes.' });
-      return;
-    }
-    const record = getRoomRecord(targetName);
-    if (!record) {
-      reply({ ok: false, error: 'Room not found.' });
-      return;
-    }
-    reply({ ok: true, codes: listVipCodes(record) });
-  });
-
-  socket.on('revoke-vip-code', ({ roomName, code } = {}, callback) => {
-    const reply = typeof callback === 'function' ? callback : () => {};
-    const targetName = normalizeRoomName(roomName);
-    const normalized = normalizeVipCode(code);
-    if (!targetName || !normalized) {
-      reply({ ok: false, error: 'Room and code are required.' });
-      return;
-    }
-    const info = getRoomInfo(targetName);
-    if (!requireOwner(info, socket)) {
-      reply({ ok: false, error: 'Only the host can revoke VIP codes.' });
-      return;
-    }
-    const record = getRoomRecord(targetName);
-    if (!record?.vipCodes?.[normalized]) {
-      reply({ ok: false, error: 'VIP code not found.' });
-      return;
-    }
-    const result = updateRoomRecord(targetName, (storedRoom) => {
-      delete storedRoom.vipCodes[normalized];
-    });
-    if (!result.ok) {
-      reply({ ok: false, error: result.error });
-      return;
-    }
-    emitVipCodesUpdate(targetName);
-    reply({ ok: true });
-  });
-
-  socket.on('redeem-vip-code', ({ code, desiredName } = {}, callback) => {
-    const reply = typeof callback === 'function' ? callback : () => {};
-    const normalized = normalizeVipCode(code);
-    if (!normalized) {
-      reply({ ok: false, reason: 'invalid or exhausted' });
-      return;
-    }
-    const entries = Object.values(roomDirectory.rooms);
-    const targetRoom = entries.find((room) => room.vipCodes && room.vipCodes[normalized]);
-    if (!targetRoom) {
-      reply({ ok: false, reason: 'invalid or exhausted' });
-      return;
-    }
-    const meta = targetRoom.vipCodes[normalized];
-    if (!meta || meta.usesLeft <= 0) {
-      reply({ ok: false, reason: 'invalid or exhausted' });
-      return;
-    }
-    let exhausted = false;
-    const result = updateRoomRecord(targetRoom.roomName, (storedRoom) => {
-      const liveMeta = storedRoom.vipCodes[normalized];
-      if (!liveMeta || liveMeta.usesLeft <= 0) {
-        exhausted = true;
-        return;
-      }
-      liveMeta.usesLeft -= 1;
-    });
-    if (!result.ok) {
-      reply({ ok: false, reason: 'invalid or exhausted' });
-      return;
-    }
-    if (exhausted) {
-      reply({ ok: false, reason: 'invalid or exhausted' });
-      return;
-    }
-    emitVipCodesUpdate(targetRoom.roomName);
-    if (!socket.data.vipRooms) socket.data.vipRooms = new Set();
-    socket.data.vipRooms.add(targetRoom.roomName);
-    const vipToken = issueVipToken(targetRoom.roomName);
-    reply({ ok: true, roomName: targetRoom.roomName, role: 'vip', vipToken, desiredName });
-
-    const roomInfo = rooms[targetRoom.roomName];
-    if (roomInfo?.ownerId) {
-      io.to(roomInfo.ownerId).emit('vip-codes-updated', listVipCodes(targetRoom));
-    }
-  });
-
-  // ======================================================
-  // ROOM JOIN + ROLE ASSIGNMENT
-  // ======================================================
-  socket.on('join-room', ({ room, name, isViewer, vipCode, vipToken } = {}, callback) => {
-    const reply = typeof callback === 'function' ? callback : () => {};
-    if (!room || typeof room !== 'string') {
-      reply({ ok: false, error: 'Invalid room' });
-      socket.emit('room-error', 'Invalid room');
-      return;
-    }
-
-    const roomName = room.trim().slice(0, 50);
-    const rawName = (name && String(name).trim()) || `User-${socket.id.slice(0, 4)}`;
-    const displayName = rawName.slice(0, 30);
-
-    const info = getRoomInfo(roomName);
-    let directoryEntry = getRoomDirectoryEntry(roomName);
-    if (directoryEntry && !directoryEntry.title) {
-      updateRoomRecord(roomName, (storedRoom) => {
-        storedRoom.title = info.streamTitle;
-      });
-    }
-
-    if (info.locked && info.ownerId && info.ownerId !== socket.id) {
-      reply({ ok: false, error: 'Room is locked by host' });
-      socket.emit('room-error', 'Room is locked by host');
-      socket.disconnect();
-      return;
-    }
-
-    const viewerMode = !!isViewer;
-    const wantsHost = !viewerMode;
-    const isClaimed = isRoomClaimed(roomName);
-
-    // Host access rules:
-    // - Unclaimed rooms: first host joins without password and claims the room.
-    // - Claimed rooms with a password: host must authenticate before joining.
-    if (wantsHost && isClaimed && directoryEntry?.ownerPassword) {
-      const authed = socket.data.hostAuthRooms && socket.data.hostAuthRooms.has(roomName);
-      if (!authed) {
-        reply({ ok: false, error: 'Host password required.' });
-        return;
-      }
-    }
-
-    if (wantsHost && !directoryEntry) {
-      const created = createRoomRecord({
-        roomName,
-        ownerPassword: null,
-        privacy: 'public'
-      });
-      if (!created.ok) {
-        reply({ ok: false, error: created.error });
-        return;
-      }
-      directoryEntry = getRoomDirectoryEntry(roomName);
-    }
-
-    // VIP access rules:
-    // - VIP token/code grants access to private rooms.
-    // - VIP codes are usage-tracked with maxUses/used.
-    const vipRooms = socket.data.vipRooms;
-    const vipTokenAccepted = vipToken ? consumeVipToken(vipToken, roomName) : false;
-    if (vipTokenAccepted) {
-      if (!socket.data.vipRooms) socket.data.vipRooms = new Set();
-      socket.data.vipRooms.add(roomName);
-    }
-
-    let vipByCode = false;
-    if (viewerMode && vipCode && directoryEntry?.vipCodes) {
-      const normalized = normalizeVipCode(vipCode);
-      const meta = normalized ? directoryEntry.vipCodes[normalized] : null;
-      if (meta && meta.usesLeft > 0) {
-        let exhausted = false;
-        const result = updateRoomRecord(roomName, (storedRoom) => {
-          const liveMeta = storedRoom.vipCodes[normalized];
-          if (!liveMeta || liveMeta.usesLeft <= 0) {
-            exhausted = true;
-            return;
-          }
-          liveMeta.usesLeft -= 1;
-        });
-        if (result.ok && !exhausted) {
-          vipByCode = true;
-          emitVipCodesUpdate(roomName);
+  socket.on('enter-host-room', ({ roomName, password }, callback) => {
+    const room = rooms.get(roomName);
+    
+    if (!room) {
+      // Create unclaimed room
+      rooms.set(roomName, {
+        host: socket.id,
+        users: new Map(),
+        claimed: false,
+        password: null,
+        isPublic: true,
+        settings: {
+          streamTitle: '',
+          slug: '',
+          isPrivate: false,
+          allowedGuests: [],
+          vipUsers: [],
+          vipCodes: [],
+          vipRequired: false
         }
-      }
-    }
+      });
 
-    const isVip =
-      viewerMode && (vipByCode || (vipRooms && vipRooms.has(roomName)) || vipTokenAccepted);
-    const vipRequired = directoryEntry ? !!directoryEntry.vipRequired : false;
+      treeManager.initializeRoom(roomName, socket.id);
 
-    if (viewerMode && directoryEntry?.privacy === 'private' && vipRequired && !isVip) {
-      reply({ ok: false, error: vipCode ? 'Invalid or exhausted VIP code.' : 'VIP code required.' });
+      callback({ ok: true });
       return;
     }
 
-    socket.join(roomName);
-    socket.data.room = roomName;
-    socket.data.name = displayName;
-    socket.data.isViewer = viewerMode;
-    socket.data.isVip = isVip;
-    socket.data.roomRole = isVip ? 'vip' : viewerMode ? 'viewer' : 'host';
-
-    if (!info.ownerId && !viewerMode) {
-      info.ownerId = socket.id;
+    // Check password for claimed rooms
+    if (room.claimed && room.password && room.password !== password) {
+      callback({ ok: false, error: 'Incorrect password' });
+      return;
     }
 
-    if (viewerMode && directoryEntry) {
-      updateRoomRecord(roomName, (storedRoom) => {
-        storedRoom.viewers = Math.max(0, (storedRoom.viewers || 0) + 1);
-      });
-    }
-
-    info.users.set(socket.id, {
-      name: displayName,
-      isViewer: viewerMode,
-      requestingCall: false,
-      isVip
-    });
-
-    const isHost = info.ownerId === socket.id;
-    socket.emit('role', {
-      isHost,
-      streamTitle: info.streamTitle
-    });
-
-    if (isHost) {
-      treeManager.initializeRoom(roomName, socket.id);
-    }
-
-    socket.to(roomName).emit('user-joined', { id: socket.id, name: displayName });
-    broadcastRoomUpdate(roomName);
-    const response = { ok: true, isVip, isHost };
-    if (isHost && directoryEntry) {
-      response.vipUsers = [...directoryEntry.vipUsers];
-      response.vipCodes = listVipCodes(directoryEntry);
-      response.privacy = directoryEntry.privacy;
-      response.vipRequired = !!directoryEntry.vipRequired;
-    }
-    reply(response);
-
-    if (viewerMode && vipByCode && directoryEntry) {
-      const hostId = info.ownerId;
-      if (hostId) {
-        io.to(hostId).emit('vip-codes-updated', listVipCodes(directoryEntry));
-      }
-    }
+    callback({ ok: true });
   });
 
-  // ======================================================
-  // RELAY VIEWER JOIN (tree-based relay)
-  // ======================================================
-  socket.on('join-room-relay', ({ room, name, deviceInfo } = {}) => {
-    if (!room || typeof room !== 'string') {
-      socket.emit('error-message', 'Invalid room');
-      return;
-    }
-
-    const roomName = normalizeRoomName(room);
-    if (!roomName) {
-      socket.emit('error-message', 'Invalid room');
-      return;
-    }
-
-    const info = getRoomInfo(roomName);
-    if (!info || !info.ownerId) {
+  // ===== RELAY NETWORK - JOIN ROOM =====
+  
+  socket.on('join-room-relay', ({ room, name, deviceInfo }) => {
+    const roomData = rooms.get(room);
+    if (!roomData) {
       socket.emit('error-message', 'Room not found');
       return;
     }
 
-    treeManager.initializeRoom(roomName, info.ownerId);
-
-    const assignment = treeManager.addViewer(roomName, socket.id, deviceInfo);
+    // Add viewer to tree
+    const assignment = treeManager.addViewer(room, socket.id, deviceInfo);
+    
     if (!assignment) {
       socket.emit('error-message', 'No available relay slots. Tree may be too deep or full.');
       return;
     }
 
-    const displayName = (name && String(name).trim().slice(0, 30)) || `Viewer-${socket.id.slice(0, 4)}`;
-
-    socket.join(roomName);
-    socket.data.room = roomName;
-    socket.data.name = displayName;
-    socket.data.isViewer = true;
-    socket.data.isRelayViewer = true;
-    socket.data.roomRole = 'viewer';
-
-    info.users.set(socket.id, {
-      name: displayName,
+    // Join socket.io room
+    socket.join(room);
+    
+    roomData.users.set(socket.id, {
+      name,
       isViewer: true,
-      requestingCall: false,
-      isVip: false
+      ...assignment
     });
 
-    const directoryEntry = getRoomDirectoryEntry(roomName);
-    if (directoryEntry) {
-      updateRoomRecord(roomName, (storedRoom) => {
-        storedRoom.viewers = Math.max(0, (storedRoom.viewers || 0) + 1);
-      });
-    }
-
+    // Tell viewer who their parent is
     socket.emit('parent-assigned', {
       parentId: assignment.parentId,
       tier: assignment.tier,
       capacity: assignment.capacity
     });
 
+    // Tell parent to accept this child
     io.to(assignment.parentId).emit('child-connecting', {
       childId: socket.id,
-      childName: displayName
+      childName: name
     });
 
-    const stats = treeManager.getTreeStats(roomName);
-    io.to(roomName).emit('tree-stats', stats);
+    // Broadcast tree stats
+    const stats = treeManager.getTreeStats(room);
+    io.to(room).emit('tree-stats', stats);
+
+    console.log(`[Relay] ${socket.id} (${name}) joined ${room} via parent ${assignment.parentId} (Tier ${assignment.tier})`);
   });
 
-  // Viewer "raise hand" request (host receives a prompt)
-  socket.on('request-to-call', () => {
-    const roomName = requireRoom(socket);
-    if (!roomName) return;
-    const info = rooms[roomName];
-    const user = info?.users.get(socket.id);
-
-    if (user) {
-      user.requestingCall = true;
-      if (info.ownerId) {
-        io.to(info.ownerId).emit('call-request-received', {
-          id: socket.id,
-          name: socket.data.name
-        });
-      }
-      broadcastRoomUpdate(roomName);
+  // ===== LEGACY JOIN (for hosts and non-relay guests) =====
+  
+  socket.on('join-room', ({ room, name, role, password }) => {
+    const roomData = rooms.get(room);
+    
+    if (!roomData) {
+      socket.emit('error-message', 'Room not found');
+      return;
     }
-  });
 
-  // Host handoff (ownership transfer)
-  socket.on('promote-to-host', ({ targetId }) => {
-    const roomName = requireRoom(socket);
-    if (!roomName) return;
-    const info = rooms[roomName];
-    if (info && info.ownerId === socket.id) {
-      info.ownerId = targetId;
-      socket.emit('role', { isHost: false });
-      const nextSocket = io.sockets.sockets.get(targetId);
-      if (nextSocket) {
-        nextSocket.emit('role', { isHost: true, streamTitle: info.streamTitle });
-      }
-      broadcastRoomUpdate(roomName);
+    // Check if trying to join as host
+    const isHost = role === 'host' || socket.id === roomData.host;
+
+    if (isHost && roomData.claimed && roomData.password !== password) {
+      socket.emit('error-message', 'Incorrect host password');
+      return;
     }
+
+    socket.join(room);
+    
+    roomData.users.set(socket.id, {
+      name,
+      isViewer: !isHost,
+      isHost: isHost
+    });
+
+    socket.emit('join-ack', {
+      room,
+      ownerId: roomData.host,
+      ...roomData.settings,
+      users: Array.from(roomData.users.entries()).map(([id, user]) => ({
+        id,
+        name: user.name,
+        isViewer: user.isViewer
+      }))
+    });
+
+    io.to(room).emit('room-update', {
+      ownerId: roomData.host,
+      users: Array.from(roomData.users.entries()).map(([id, user]) => ({
+        id,
+        name: user.name,
+        isViewer: user.isViewer
+      }))
+    });
+
+    console.log(`[Join] ${socket.id} (${name}) joined ${room} as ${isHost ? 'host' : 'guest'}`);
   });
 
-  // Room locking (host only)
-  socket.on('lock-room', (locked) => {
-    const roomName = requireRoom(socket);
-    if (!roomName) return;
-    const info = rooms[roomName];
-    if (!requireOwner(info, socket)) return;
-    info.locked = !!locked;
-    broadcastRoomUpdate(roomName);
-  });
-
-  // Stream title update (host only)
-  socket.on('update-stream-title', (title) => {
-    const roomName = requireRoom(socket);
-    if (!roomName) return;
-    const info = rooms[roomName];
-    if (!requireOwner(info, socket)) return;
-    info.streamTitle = (title || 'Untitled Stream').slice(0, 100);
-    const directoryEntry = getRoomDirectoryEntry(roomName);
-    if (directoryEntry) {
-      updateRoomRecord(roomName, (storedRoom) => {
-        storedRoom.title = info.streamTitle;
-      });
-    }
-    broadcastRoomUpdate(roomName);
-  });
-
-  // Remove a user from the room (host only)
-  socket.on('kick-user', (targetId) => {
-    const roomName = requireRoom(socket);
-    if (!roomName) return;
-    const info = rooms[roomName];
-    if (!requireOwner(info, socket)) return;
-
-    const targetSocket = io.sockets.sockets.get(targetId);
-    if (targetSocket) {
-      targetSocket.emit('kicked');
-      targetSocket.leave(roomName);
-      targetSocket.disconnect();
-    }
-    info.users.delete(targetId);
-    broadcastRoomUpdate(roomName);
-  });
-
-  // ======================================================
-  // WEBRTC BROADCAST SIGNALING (host <-> viewer)
-  // ======================================================
-  socket.on('webrtc-offer', ({ targetId, sdp }) => {
-    if (targetId && sdp) relayToTarget('webrtc-offer', targetId, { sdp, from: socket.id });
-  });
-  socket.on('webrtc-answer', ({ targetId, sdp }) => {
-    if (targetId && sdp) relayToTarget('webrtc-answer', targetId, { sdp, from: socket.id });
-  });
-  socket.on('webrtc-ice-candidate', ({ targetId, candidate }) => {
-    if (targetId && candidate) relayToTarget('webrtc-ice-candidate', targetId, { candidate, from: socket.id });
-  });
-
-  // ======================================================
-  // RELAY SIGNALING (viewer <-> parent/children)
-  // ======================================================
+  // ===== RELAY SIGNALING =====
+  
   socket.on('relay-offer', ({ to, offer }) => {
-    if (to && offer) relayToTarget('relay-offer', to, { from: socket.id, offer });
+    io.to(to).emit('relay-offer', {
+      from: socket.id,
+      offer
+    });
   });
+
   socket.on('relay-answer', ({ to, answer }) => {
-    if (to && answer) relayToTarget('relay-answer', to, { from: socket.id, answer });
+    io.to(to).emit('relay-answer', {
+      from: socket.id,
+      answer
+    });
   });
+
   socket.on('relay-ice', ({ to, candidate, forParent }) => {
-    if (to && candidate) relayToTarget('relay-ice', to, { from: socket.id, candidate, forParent: !!forParent });
+    io.to(to).emit('relay-ice', {
+      from: socket.id,
+      candidate,
+      forParent
+    });
   });
 
-  // ======================================================
-  // CALL SIGNALING (host <-> viewer 1:1)
-  // ======================================================
+  // ===== LEGACY WEBRTC SIGNALING =====
+  
+  socket.on('webrtc-offer', ({ to, offer }) => {
+    io.to(to).emit('webrtc-offer', { from: socket.id, offer });
+  });
+
+  socket.on('webrtc-answer', ({ to, answer }) => {
+    io.to(to).emit('webrtc-answer', { from: socket.id, answer });
+  });
+
+  socket.on('ice-candidate', ({ to, candidate }) => {
+    io.to(to).emit('ice-candidate', { from: socket.id, candidate });
+  });
+
+  // ===== CALL MODE SIGNALING =====
+  
+  socket.on('call-offer', ({ to, offer }) => {
+    io.to(to).emit('call-offer', { from: socket.id, offer });
+  });
+
+  socket.on('call-answer', ({ to, answer }) => {
+    io.to(to).emit('call-answer', { from: socket.id, answer });
+  });
+
+  socket.on('call-ice', ({ to, candidate }) => {
+    io.to(to).emit('call-ice', { from: socket.id, candidate });
+  });
+
   socket.on('ring-user', (targetId) => {
-    relayToTarget('ring-alert', targetId, { from: socket.data.name, fromId: socket.id });
-  });
-  socket.on('call-offer', ({ targetId, offer }) => {
-    if (targetId && offer) {
-      relayToTarget('incoming-call', targetId, { from: socket.id, name: socket.data.name, offer });
-    }
-  });
-  socket.on('call-answer', ({ targetId, answer }) => {
-    if (targetId && answer) relayToTarget('call-answer', targetId, { from: socket.id, answer });
-  });
-  socket.on('call-ice', ({ targetId, candidate }) => {
-    if (targetId && candidate) relayToTarget('call-ice', targetId, { from: socket.id, candidate });
-  });
-  socket.on('call-end', ({ targetId }) => {
-    relayToTarget('call-end', targetId, { from: socket.id });
-  });
-
-  // ======================================================
-  // CHAT + FILE EVENTS
-  // ======================================================
-  socket.on('public-chat', ({ room, name, text, fromViewer }) => {
-    const roomName = room || socket.data.room;
-    if (!roomName || !text) return;
-    const info = rooms[roomName];
-    io.to(roomName).emit('public-chat', {
-      name: (name || socket.data.name || 'Anon').slice(0, 30),
-      text: String(text).slice(0, 500),
-      ts: Date.now(),
-      isOwner: info && info.ownerId === socket.id,
-      fromViewer: !!fromViewer
+    const user = Array.from(rooms.values())
+      .flatMap(room => Array.from(room.users.entries()))
+      .find(([id]) => id === socket.id);
+    
+    io.to(targetId).emit('ring-you', {
+      from: socket.id,
+      fromName: user ? user[1].name : 'Unknown'
     });
   });
 
-  socket.on('private-chat', ({ room, name, text }) => {
-    const roomName = room || socket.data.room;
-    if (!roomName || !text) return;
-    io.to(roomName).emit('private-chat', {
-      name: (name || socket.data.name || 'Anon').slice(0, 30),
-      text: String(text).slice(0, 500),
-      ts: Date.now()
+  socket.on('end-call', ({ to }) => {
+    io.to(to).emit('end-call', { from: socket.id });
+  });
+
+  // ===== CHAT =====
+  
+  socket.on('public-chat', ({ room, name, text, ts }) => {
+    io.to(room).emit('public-chat', { name, text, ts: ts || Date.now() });
+  });
+
+  socket.on('private-chat', ({ room, name, text, ts }) => {
+    io.to(room).emit('private-chat', { name, text, ts: ts || Date.now() });
+  });
+
+  // ===== ROOM SETTINGS =====
+  
+  socket.on('set-stream-title', ({ title }, callback) => {
+    rooms.forEach((roomData, roomName) => {
+      if (roomData.host === socket.id) {
+        roomData.settings.streamTitle = title;
+        if (callback) callback({ ok: true });
+      }
     });
   });
 
-  socket.on('file-share', ({ room, name, fileName, fileType, fileData }) => {
-    const roomName = room || socket.data.room;
-    if (!roomName || !fileName || !fileData) return;
-    io.to(roomName).emit('file-share', {
-      name: (name || socket.data.name).slice(0, 30),
-      fileName: String(fileName).slice(0, 100),
-      fileType: fileType || 'application/octet-stream',
-      fileData
+  socket.on('set-slug', ({ slug }, callback) => {
+    rooms.forEach((roomData, roomName) => {
+      if (roomData.host === socket.id) {
+        roomData.settings.slug = slug;
+        if (callback) callback({ ok: true });
+      }
     });
   });
 
-  // ======================================================
-  // CLEANUP
-  // ======================================================
+  socket.on('set-public-room', ({ isPublic }, callback) => {
+    rooms.forEach((roomData, roomName) => {
+      if (roomData.host === socket.id) {
+        roomData.isPublic = isPublic;
+        if (callback) callback({ ok: true });
+      }
+    });
+  });
+
+  // ===== VIP SYSTEM =====
+  
+  socket.on('add-vip-user', ({ userName }, callback) => {
+    rooms.forEach((roomData, roomName) => {
+      if (roomData.host === socket.id) {
+        if (!roomData.settings.vipUsers.includes(userName)) {
+          roomData.settings.vipUsers.push(userName);
+        }
+        if (callback) callback({ ok: true });
+      }
+    });
+  });
+
+  socket.on('generate-vip-code', ({ uses }, callback) => {
+    rooms.forEach((roomData, roomName) => {
+      if (roomData.host === socket.id) {
+        const code = Math.random().toString(36).substring(2, 8).toUpperCase();
+        roomData.settings.vipCodes.push({ code, uses: uses || 1 });
+        if (callback) callback({ ok: true, code });
+      }
+    });
+  });
+
+  // ===== PUBLIC ROOMS LIST =====
+  
+  socket.on('get-public-rooms', () => {
+    const publicRooms = Array.from(rooms.entries())
+      .filter(([name, data]) => data.isPublic)
+      .map(([name, data]) => ({
+        name,
+        title: data.settings.streamTitle || name,
+        viewers: data.users.size,
+        slug: data.settings.slug
+      }));
+    
+    socket.emit('public-rooms', publicRooms);
+  });
+
+  // ===== TREE VISUALIZATION =====
+  
+  socket.on('get-tree-structure', ({ room }) => {
+    const tree = treeManager.exportTree(room);
+    const stats = treeManager.getTreeStats(room);
+    socket.emit('tree-structure', { tree, stats });
+  });
+
+  // ===== DISCONNECT HANDLING =====
+  
   socket.on('disconnect', () => {
-    const roomName = socket.data.room;
-    if (!roomName) return;
-    const info = rooms[roomName];
-    if (!info) return;
-    info.users.delete(socket.id);
-    const directoryEntry = getRoomDirectoryEntry(roomName);
-    if (directoryEntry && socket.data.isViewer) {
-      updateRoomRecord(roomName, (storedRoom) => {
-        storedRoom.viewers = Math.max(0, (storedRoom.viewers || 0) - 1);
-      });
-    }
+    console.log(`[Socket] Disconnected: ${socket.id}`);
 
-    if (info.ownerId === socket.id) {
-      info.ownerId = null;
-      if (directoryEntry) {
-        updateRoomRecord(roomName, (storedRoom) => {
-          storedRoom.isLive = false;
-        });
+    rooms.forEach((roomData, roomName) => {
+      if (roomData.users.has(socket.id)) {
+        // Remove from tree and get orphans
+        const { orphans } = treeManager.removeViewer(roomName, socket.id);
+        
+        // Reassign orphans to new parents
+        if (orphans.length > 0) {
+          const assignments = treeManager.reassignOrphans(roomName, orphans);
+          
+          assignments.forEach(({ childId, newParentId, tier }) => {
+            // Tell orphan about new parent
+            io.to(childId).emit('parent-changed', {
+              newParentId,
+              tier
+            });
+            
+            // Tell new parent to accept child
+            io.to(newParentId).emit('child-connecting', {
+              childId
+            });
+          });
+
+          console.log(`[Relay] Reassigned ${assignments.length} orphans after ${socket.id} disconnect`);
+        }
+
+        // Remove from room users
+        roomData.users.delete(socket.id);
+
+        // If host disconnected, destroy room
+        if (socket.id === roomData.host) {
+          console.log(`[Room] Host disconnected, destroying room: ${roomName}`);
+          treeManager.destroyRoom(roomName);
+          rooms.delete(roomName);
+          io.to(roomName).emit('host-disconnected');
+        } else {
+          // Broadcast updated user list
+          io.to(roomName).emit('room-update', {
+            ownerId: roomData.host,
+            users: Array.from(roomData.users.entries()).map(([id, user]) => ({
+              id,
+              name: user.name,
+              isViewer: user.isViewer
+            }))
+          });
+
+          // Broadcast tree stats
+          const stats = treeManager.getTreeStats(roomName);
+          if (stats) {
+            io.to(roomName).emit('tree-stats', stats);
+          }
+        }
       }
+    });
+  });
 
-      treeManager.destroyRoom(roomName);
-    }
-
-    if (treeManager.hasNode(roomName, socket.id)) {
-      const { orphans } = treeManager.removeViewer(roomName, socket.id);
-      if (orphans.length > 0) {
-        const assignments = treeManager.reassignOrphans(roomName, orphans);
-        assignments.forEach(({ childId, newParentId, tier }) => {
-          io.to(childId).emit('parent-changed', { newParentId, tier });
-          io.to(newParentId).emit('child-connecting', { childId });
-        });
+  socket.on('leave-room', () => {
+    rooms.forEach((roomData, roomName) => {
+      if (roomData.users.has(socket.id)) {
+        roomData.users.delete(socket.id);
+        socket.leave(roomName);
+        
+        const { orphans } = treeManager.removeViewer(roomName, socket.id);
+        
+        if (orphans.length > 0) {
+          const assignments = treeManager.reassignOrphans(roomName, orphans);
+          assignments.forEach(({ childId, newParentId }) => {
+            io.to(childId).emit('parent-changed', { newParentId });
+            io.to(newParentId).emit('child-connecting', { childId });
+          });
+        }
       }
-      const stats = treeManager.getTreeStats(roomName);
-      if (stats) io.to(roomName).emit('tree-stats', stats);
-    }
-
-    socket.to(roomName).emit('user-left', { id: socket.id });
-    if (info.users.size === 0) delete rooms[roomName];
-    else broadcastRoomUpdate(roomName);
+    });
   });
 });
 
-server.listen(PORT, '0.0.0.0', () => {
-  console.log(`Rebel Secure Server running on ${PORT}`);
+/**
+ * HTTP ROUTES
+ */
+app.get('/api/rooms', (req, res) => {
+  const publicRooms = Array.from(rooms.entries())
+    .filter(([name, data]) => data.isPublic)
+    .map(([name, data]) => ({
+      name,
+      title: data.settings.streamTitle || name,
+      viewers: data.users.size,
+      slug: data.settings.slug
+    }));
+  
+  res.json({ rooms: publicRooms });
 });
+
+app.get('/api/tree/:room', (req, res) => {
+  const tree = treeManager.exportTree(req.params.room);
+  const stats = treeManager.getTreeStats(req.params.room);
+  res.json({ tree, stats });
+});
+
+/**
+ * START SERVER
+ */
+const PORT = process.env.PORT || 3000;
+
+http.listen(PORT, () => {
+  console.log(`
+╔═══════════════════════════════════════════════╗
+║   REBEL STREAM - DECENTRALIZED RELAY SERVER   ║
+║   Running on port ${PORT}                        ║
+║   Mode: Tree-Based P2P Relay Network          ║
+╚═══════════════════════════════════════════════╝
+  `);
+});
+
+module.exports = { app, io, treeManager };
