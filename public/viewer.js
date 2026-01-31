@@ -688,8 +688,7 @@ window.addEventListener('load', () => {
               : '';
           joinStatus.textContent = vipMessage || errorText || 'Unable to join room.';
         }
-      }
-    );
+      );
   };
 
   const attemptJoin = async () => {
