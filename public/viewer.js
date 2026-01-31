@@ -20,7 +20,7 @@
 
 const $ = id => document.getElementById(id);
 const DEBUG_SIGNAL = window.DEBUG_SIGNAL === true;
-const socket = io({ autoConnect: true });
+const socket = io({ autoConnect: false });
 
 function getRtcConfig() {
   return { iceServers: getIceServers(state.turnConfig) };
@@ -671,22 +671,9 @@ window.addEventListener('load', () => {
 
   const roomInfoPromise = hydrateRoomInfo(room);
 
-  socket.on('connect_error', () => {
-    if (state.joined) return;
-    if (joinStatus) {
-      joinStatus.textContent = 'Unable to connect. Please try again.';
-    }
-  });
-
   const completeJoin = async (vipToken) => {
     const codeValue = vipToken ? '' : vipInput?.value.trim();
-    const connected = await ensureSocketConnected();
-    if (!connected) {
-      if (joinStatus) {
-        joinStatus.textContent = 'Unable to connect. Please try again.';
-      }
-      return;
-    }
+    await ensureSocketConnected();
     let responseHandled = false;
     const timeoutId = setTimeout(() => {
       if (responseHandled) return;
@@ -720,8 +707,7 @@ window.addEventListener('load', () => {
               : '';
           joinStatus.textContent = vipMessage || errorText || 'Unable to join room.';
         }
-      }
-    );
+      );
   };
 
   const attemptJoin = async () => {
