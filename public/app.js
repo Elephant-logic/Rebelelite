@@ -1574,7 +1574,32 @@ function emitWithAck(eventName, payload) {
   });
 }
 
+function ensureSocketConnected({ timeoutMs = 6000 } = {}) {
+  if (socket.connected) return Promise.resolve(true);
+  return new Promise((resolve) => {
+    let settled = false;
+    const finish = (ok) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timerId);
+      socket.off('connect', handleConnect);
+      socket.off('connect_error', handleError);
+      resolve(ok);
+    };
+    const handleConnect = () => finish(true);
+    const handleError = () => finish(false);
+    const timerId = setTimeout(() => finish(false), timeoutMs);
+    socket.once('connect', handleConnect);
+    socket.once('connect_error', handleError);
+    socket.connect();
+  });
+}
+
 async function ensureHostRoom(roomName) {
+  const connected = await ensureSocketConnected();
+  if (!connected) {
+    return { ok: false, error: 'Unable to connect to server.' };
+  }
   const info = await emitWithAck('get-room-info', { roomName });
   if (!info?.exists) {
     const createResp = await emitWithAck('enter-host-room', {
@@ -1622,7 +1647,11 @@ async function joinRoomAsHost(room) {
   const nameInput = $('nameInput');
   state.userName = nameInput && nameInput.value.trim() ? nameInput.value.trim() : 'Host';
 
-  if (!socket.connected) socket.connect();
+  const connected = await ensureSocketConnected();
+  if (!connected) {
+    alert('Unable to connect to server.');
+    return;
+  }
 
   const access = await ensureHostRoom(room);
   if (!access.ok) {
@@ -2062,6 +2091,8 @@ function collectTurnConfigFromInputs() {
 
 async function loadRoomConfig(roomName) {
   if (!roomName) return;
+  const connected = await ensureSocketConnected();
+  if (!connected) return;
   const resp = await emitWithAck('get-room-config', { roomName });
   if (resp?.ok) {
     applyPaymentConfig(resp);
