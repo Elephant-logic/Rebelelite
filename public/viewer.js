@@ -458,10 +458,15 @@ socket.on("call-end", handleCallEnd);
 // ======================================================
 // 4. CHAT + SYSTEM MESSAGES
 // ======================================================
+function shouldAutoScroll(log) {
+  return log.scrollHeight - log.scrollTop <= log.clientHeight + 20;
+}
+
 function appendChat(name, text) {
   const log = $('chatLog');
   if (!log) return;
 
+  const shouldScroll = shouldAutoScroll(log);
   const div = document.createElement('div');
   div.className = 'chat-line';
 
@@ -474,7 +479,9 @@ function appendChat(name, text) {
   div.appendChild(strong);
   div.appendChild(span);
   log.appendChild(div);
-  log.scrollTop = log.scrollHeight;
+  if (shouldScroll) {
+    log.scrollTop = log.scrollHeight;
+  }
 }
 
 function getFriendlyVipMessage(error, hasCode) {
