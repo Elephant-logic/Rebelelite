@@ -458,17 +458,8 @@ socket.on("call-end", handleCallEnd);
 // ======================================================
 // 4. CHAT + SYSTEM MESSAGES
 // ======================================================
-const MAX_CHAT_LINES = 200;
-
 function shouldAutoScroll(log) {
   return log.scrollHeight - log.scrollTop <= log.clientHeight + 20;
-}
-
-function trimChatLog(log) {
-  if (!log) return;
-  while (log.children.length > MAX_CHAT_LINES) {
-    log.removeChild(log.firstChild);
-  }
 }
 
 function appendChat(name, text) {
@@ -488,7 +479,6 @@ function appendChat(name, text) {
   div.appendChild(strong);
   div.appendChild(span);
   log.appendChild(div);
-  trimChatLog(log);
   if (shouldScroll) {
     log.scrollTop = log.scrollHeight;
   }
