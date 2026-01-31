@@ -19,6 +19,7 @@
 // 6) PeerConnection connects and stream is displayed.
 
 const $ = id => document.getElementById(id);
+const DEBUG_SIGNAL = window.DEBUG_SIGNAL === true;
 const socket = io({ autoConnect: false });
 
 function getRtcConfig() {
@@ -679,7 +680,6 @@ window.addEventListener('load', () => {
           }
         }
       );
-    });
   };
 
   const attemptJoin = async () => {
