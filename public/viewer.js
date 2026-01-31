@@ -668,6 +668,7 @@ window.addEventListener('load', () => {
   const joinBtn = $('joinRoomBtn');
   const joinStatus = $('joinStatus');
   let activeVipToken = vipTokenParam ? vipTokenParam.trim() : '';
+  let triedVipTokenFallback = false;
 
   const roomInfoPromise = hydrateRoomInfo(room);
 
