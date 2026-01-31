@@ -853,6 +853,11 @@ function switchTab(name) {
     activeLog.scrollTop = activeLog.scrollHeight;
     delete activeLog.dataset.pendingScroll;
   }
+  const activeInput =
+    name === 'stream' ? dom.inputPublic : name === 'room' ? dom.inputPrivate : null;
+  if (activeInput && activeInput.offsetParent !== null) {
+    activeInput.focus();
+  }
 }
 
 if (tabs.stream) tabs.stream.onclick = () => switchTab('stream');
@@ -2253,6 +2258,7 @@ function appendChat(log, name, text, ts) {
 }
 
 function sendPublic() {
+  if (!dom.contentStream?.classList.contains('active')) return;
   if (!dom.inputPublic) return;
   const t = dom.inputPublic.value.trim();
   if (!t || !state.currentRoom) return;
@@ -2277,6 +2283,7 @@ if (dom.inputPublic) {
 }
 
 function sendPrivate() {
+  if (!dom.contentRoom?.classList.contains('active')) return;
   if (!dom.inputPrivate) return;
   const t = dom.inputPrivate.value.trim();
   if (!t || !state.currentRoom) return;
