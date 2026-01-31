@@ -704,8 +704,9 @@ window.addEventListener('load', () => {
   const emojiStrip = $('emojiStrip');
   if (emojiStrip && chatInput) {
     emojiStrip.onclick = (e) => {
-      if (e.target.classList.contains('emoji')) {
-        chatInput.value += e.target.textContent;
+      const emoji = e.target.closest?.('.emoji');
+      if (emoji) {
+        chatInput.value += emoji.textContent;
         chatInput.focus();
       }
     };

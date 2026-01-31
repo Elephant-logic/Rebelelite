@@ -2230,6 +2230,7 @@ function appendChat(log, name, text, ts) {
 }
 
 function sendPublic() {
+  if (dom.contentStream && !dom.contentStream.classList.contains('active')) return;
   if (!dom.inputPublic) return;
   const t = dom.inputPublic.value.trim();
   if (!t || !state.currentRoom) return;
@@ -2254,6 +2255,7 @@ if (dom.inputPublic) {
 }
 
 function sendPrivate() {
+  if (dom.contentRoom && !dom.contentRoom.classList.contains('active')) return;
   if (!dom.inputPrivate) return;
   const t = dom.inputPrivate.value.trim();
   if (!t || !state.currentRoom) return;
@@ -2300,16 +2302,24 @@ socket.on('private-chat', (d) => {
 
 if (dom.emojiStripPublic) {
   dom.emojiStripPublic.onclick = (e) => {
-    if (e.target.classList.contains('emoji')) {
-      if (dom.inputPublic) dom.inputPublic.value += e.target.textContent;
+    const emoji = e.target.closest?.('.emoji');
+    if (emoji) {
+      if (dom.inputPublic) {
+        dom.inputPublic.value += emoji.textContent;
+        dom.inputPublic.focus();
+      }
     }
   };
 }
 
 if (dom.emojiStripPrivate) {
   dom.emojiStripPrivate.onclick = (e) => {
-    if (e.target.classList.contains('emoji')) {
-      if (dom.inputPrivate) dom.inputPrivate.value += e.target.textContent;
+    const emoji = e.target.closest?.('.emoji');
+    if (emoji) {
+      if (dom.inputPrivate) {
+        dom.inputPrivate.value += emoji.textContent;
+        dom.inputPrivate.focus();
+      }
     }
   };
 }
