@@ -7,34 +7,42 @@ class RelayViewer {
   constructor(socket, getRtcConfig) {
     this.socket = socket;
     this.getRtcConfig = getRtcConfig;
-    
+
     // Parent connection
     this.parentPc = null;
     this.incomingStream = null;
-    
+
     // Child connections
     this.childPeers = new Map();
-    
+
     // Data channels
     this.parentDataChannel = null;
     this.childDataChannels = new Map();
-    
+
     // File relay state
     this.relayBuffer = {
       meta: null,
       chunks: [],
       receivedSize: 0
     };
-    
+
     // Status
     this.mySocketId = null;
     this.parentId = null;
     this.tier = null;
     this.capacity = 0;
-    
+
+    // Backpressure safety
+    this.MAX_DC_BUFFERED = 8 * 1024 * 1024; // 8MB cap per child datachannel
+
+    // File handling policy:
+    // Relay nodes should not auto-download relayed files (bandwidth/UX amplification).
+    // If you want relays to also download, set to true externally.
+    this.downloadRelayedFiles = false;
+
     // Callbacks
     this.onStatusUpdate = null;
-    
+
     this.init();
   }
 
@@ -85,7 +93,7 @@ class RelayViewer {
   detectDeviceCapabilities() {
     const isMobile = /Android|webOS|iPhone|iPad|iPod/i.test(navigator.userAgent);
     const conn = navigator.connection || navigator.mozConnection || navigator.webkitConnection || {};
-    
+
     return {
       isMobile,
       connection: conn.effectiveType || 'unknown',
@@ -100,13 +108,13 @@ class RelayViewer {
     this.parentPc.ontrack = (event) => {
       console.log('[Relay] Received track from parent:', event.track.kind);
       this.incomingStream = event.streams[0];
-      
+
       // Display locally
       const video = document.getElementById('viewerVideo');
       if (video) {
         video.srcObject = this.incomingStream;
       }
-      
+
       // Forward to children
       this.forwardToChildren();
       this.updateStatus();
@@ -117,7 +125,7 @@ class RelayViewer {
         this.parentDataChannel = event.channel;
         this.setupParentDataChannel();
       }
-    });
+    };
 
     this.parentPc.onicecandidate = (e) => {
       if (e.candidate) {
@@ -140,7 +148,7 @@ class RelayViewer {
       await this.parentPc.setRemoteDescription(offer);
       const answer = await this.parentPc.createAnswer();
       await this.parentPc.setLocalDescription(answer);
-      
+
       this.socket.emit('relay-answer', {
         to: this.parentId,
         answer: this.parentPc.localDescription
@@ -153,6 +161,14 @@ class RelayViewer {
   }
 
   async acceptChild(childId) {
+    // HARD CAPACITY GUARD (prevents overload even if server mis-assigns)
+    if (typeof this.capacity === 'number' && this.capacity >= 0) {
+      if (this.childPeers.size >= this.capacity) {
+        console.warn('[Relay] Capacity reached. Refusing child:', childId, 'cap=', this.capacity);
+        return;
+      }
+    }
+
     if (this.childPeers.has(childId)) {
       console.warn('[Relay] Child already exists:', childId);
       return;
@@ -187,13 +203,20 @@ class RelayViewer {
 
     pc.onconnectionstatechange = () => {
       console.log('[Relay] Child', childId, 'state:', pc.connectionState);
+
+      // CLEANUP ON FAILURE/CLOSE
+      if (pc.connectionState === 'failed' || pc.connectionState === 'closed' || pc.connectionState === 'disconnected') {
+        this.removeChild(childId);
+        return;
+      }
+
       this.updateStatus();
     };
 
     try {
       const offer = await pc.createOffer();
       await pc.setLocalDescription(offer);
-      
+
       this.socket.emit('relay-offer', {
         to: childId,
         offer: pc.localDescription
@@ -203,6 +226,8 @@ class RelayViewer {
     } catch (err) {
       console.error('[Relay] Error creating offer for child:', err);
       this.childPeers.delete(childId);
+      this.childDataChannels.delete(childId);
+      try { pc.close(); } catch (e) {}
     }
   }
 
@@ -232,7 +257,7 @@ class RelayViewer {
 
     this.childPeers.forEach((pc, childId) => {
       const senders = pc.getSenders();
-      
+
       this.incomingStream.getTracks().forEach(track => {
         const exists = senders.find(s => s.track?.id === track.id);
         if (!exists) {
@@ -255,7 +280,10 @@ class RelayViewer {
           const parsed = JSON.parse(data);
           if (parsed.type === 'meta') {
             this.relayBuffer.meta = parsed;
+
+            // Forward meta immediately
             this.broadcastToChildren(data);
+
             console.log('[Relay] File incoming:', parsed.name);
             return;
           }
@@ -266,12 +294,12 @@ class RelayViewer {
       if (data instanceof ArrayBuffer) {
         this.relayBuffer.chunks.push(data);
         this.relayBuffer.receivedSize += data.byteLength;
-        
+
         // Forward to children without waiting
         this.broadcastToChildren(data);
 
         // Check if complete
-        if (this.relayBuffer.meta && 
+        if (this.relayBuffer.meta &&
             this.relayBuffer.receivedSize >= this.relayBuffer.meta.size) {
           this.assembleFile();
         }
@@ -300,38 +328,56 @@ class RelayViewer {
 
   broadcastToChildren(data) {
     this.childDataChannels.forEach((dc, childId) => {
-      if (dc.readyState === 'open') {
-        try {
-          dc.send(data);
-        } catch (err) {
-          console.error('[Relay] Error sending to child:', childId, err);
-        }
+      if (dc.readyState !== 'open') return;
+
+      // BACKPRESSURE SAFETY:
+      // If a child is slow/backgrounded, bufferedAmount can explode.
+      // We hard-drop that child to protect the relay node.
+      if (dc.bufferedAmount > this.MAX_DC_BUFFERED) {
+        console.warn('[Relay] Child DC buffered too high, dropping child:', childId, 'buffered=', dc.bufferedAmount);
+        this.removeChild(childId);
+        return;
+      }
+
+      try {
+        dc.send(data);
+      } catch (err) {
+        console.error('[Relay] Error sending to child:', childId, err);
+        this.removeChild(childId);
       }
     });
   }
 
   assembleFile() {
-    const blob = new Blob(this.relayBuffer.chunks, { 
-      type: this.relayBuffer.meta.mime 
-    });
-    
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement('a');
-    a.href = url;
-    a.download = this.relayBuffer.meta.name;
-    a.click();
-    
-    URL.revokeObjectURL(url);
-    
-    console.log('[Relay] File assembled:', this.relayBuffer.meta.name);
-    
+    // NOTE:
+    // We keep assembling internally for correctness checks, but relay nodes should not auto-download by default.
+    // This prevents “relay becomes accidental downloader” behavior.
+
+    if (this.downloadRelayedFiles) {
+      const blob = new Blob(this.relayBuffer.chunks, {
+        type: this.relayBuffer.meta.mime
+      });
+
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = this.relayBuffer.meta.name;
+      a.click();
+
+      URL.revokeObjectURL(url);
+
+      console.log('[Relay] File assembled (downloaded):', this.relayBuffer.meta.name);
+    } else {
+      console.log('[Relay] File assembled (no download, relay mode):', this.relayBuffer.meta?.name);
+    }
+
     // Reset buffer
     this.relayBuffer = { meta: null, chunks: [], receivedSize: 0 };
   }
 
   async handleParentChange(newParentId) {
     console.log('[Relay] Changing parent from', this.parentId, 'to', newParentId);
-    
+
     if (this.parentPc) {
       this.parentPc.close();
       this.parentPc = null;
@@ -339,7 +385,7 @@ class RelayViewer {
 
     this.parentId = newParentId;
     this.incomingStream = null;
-    
+
     await this.connectToParent();
     this.updateStatus();
   }
@@ -347,7 +393,7 @@ class RelayViewer {
   removeChild(childId) {
     const pc = this.childPeers.get(childId);
     if (pc) {
-      pc.close();
+      try { pc.close(); } catch (e) {}
       this.childPeers.delete(childId);
       this.childDataChannels.delete(childId);
       console.log('[Relay] Removed child:', childId);
@@ -357,9 +403,9 @@ class RelayViewer {
 
   joinRoom(roomName, viewerName) {
     const deviceInfo = this.detectDeviceCapabilities();
-    
+
     console.log('[Relay] Joining room:', roomName, 'with device info:', deviceInfo);
-    
+
     this.socket.emit('join-room-relay', {
       room: roomName,
       name: viewerName,
@@ -381,7 +427,7 @@ class RelayViewer {
 
   updateStatus() {
     const status = this.getStatus();
-    
+
     if (this.onStatusUpdate) {
       this.onStatusUpdate(status);
     }
@@ -389,10 +435,12 @@ class RelayViewer {
 
   destroy() {
     if (this.parentPc) {
-      this.parentPc.close();
+      try { this.parentPc.close(); } catch (e) {}
     }
 
-    this.childPeers.forEach(pc => pc.close());
+    this.childPeers.forEach(pc => {
+      try { pc.close(); } catch (e) {}
+    });
     this.childPeers.clear();
     this.childDataChannels.clear();
   }
