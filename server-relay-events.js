@@ -1,18 +1,18 @@
 /**
  * SERVER RELAY EVENTS - Add-On Module for YOUR Server
  * Adds relay network without breaking existing functionality
- * 
+ *
  * Usage: Add this ONE line inside io.on('connection', (socket) => { ... }):
  * require('./server-relay-events')(io, socket, treeManager, rooms, roomDirectory);
  */
 
 module.exports = function(io, socket, treeManager, rooms, roomDirectory) {
-  
+
   // Relay network - viewer joins via tree
   socket.on('join-room-relay', ({ room, name, deviceInfo }) => {
     const roomName = room;
     console.log(`[Relay] Join request: ${name} -> ${roomName}`);
-    
+
     // Check if room exists
     const info = rooms[roomName];
     if (!info) {
@@ -34,7 +34,7 @@ module.exports = function(io, socket, treeManager, rooms, roomDirectory) {
 
     // Add viewer to tree
     const assignment = treeManager.addViewer(roomName, socket.id, deviceInfo);
-    
+
     if (!assignment) {
       socket.emit('error-message', 'No available relay slots. Try again later.');
       return;
@@ -42,7 +42,7 @@ module.exports = function(io, socket, treeManager, rooms, roomDirectory) {
 
     // Join socket.io room
     socket.join(roomName);
-    
+
     // Store in room state
     info.users.set(socket.id, {
       name,
@@ -96,41 +96,48 @@ module.exports = function(io, socket, treeManager, rooms, roomDirectory) {
   });
 
   socket.on('relay-ice', ({ to, candidate, forParent }) => {
-    io.to(to).emit('relay-ice', { 
-      from: socket.id, 
-      candidate, 
-      forParent 
+    io.to(to).emit('relay-ice', {
+      from: socket.id,
+      candidate,
+      forParent
     });
   });
 
   // Intercept disconnect to handle relay cleanup
   const originalListeners = socket.listeners('disconnect');
-  
+
   // Remove existing disconnect listeners temporarily
   socket.removeAllListeners('disconnect');
-  
+
   // Add our relay cleanup, then restore original listeners
   socket.on('disconnect', () => {
     // Handle relay cleanup first
     if (socket.data.isRelay && socket.data.room) {
       const roomName = socket.data.room;
-      
-      // Remove from tree and get orphans
-      const { orphans } = treeManager.removeViewer(roomName, socket.id);
-      
+
+      // Remove from tree and get orphans + parentId (for child-disconnected)
+      const { orphans, parentId } = treeManager.removeViewer(roomName, socket.id);
+
+      // Notify parent to clean up this child peer
+      if (parentId) {
+        io.to(parentId).emit('child-disconnected', {
+          childId: socket.id
+        });
+      }
+
       if (orphans.length > 0) {
         // Reassign orphans to new parents
         const assignments = treeManager.reassignOrphans(roomName, orphans);
-        
+
         assignments.forEach(({ childId, newParentId }) => {
           // Tell orphan about new parent
-          io.to(childId).emit('parent-changed', { 
-            newParentId 
+          io.to(childId).emit('parent-changed', {
+            newParentId
           });
-          
+
           // Tell new parent to accept child
-          io.to(newParentId).emit('child-connecting', { 
-            childId 
+          io.to(newParentId).emit('child-connecting', {
+            childId
           });
         });
 
