@@ -377,43 +377,12 @@ io.on('connection', (socket) => {
     socket.emit('public-rooms', listPublicRooms());
   });
 
-  socket.on('claim-room', ({ name, password, privacy } = {}, callback) => {
+  // ======================================================
+  // PATCH: DISABLE FREE ROOM CLAIMING (SELLING ROOMS ONLY)
+  // ======================================================
+  socket.on('claim-room', (_ = {}, callback) => {
     const reply = typeof callback === 'function' ? callback : () => {};
-    const roomName = normalizeRoomName(name);
-    if (!roomName || !password) {
-      reply({ ok: false, error: 'Room name and password are required.' });
-      return;
-    }
-    
-    // Foundation check
-    if (foundationRegistry.isFoundationRoom(roomName)) {
-      reply({ ok: false, error: 'This is a Foundation Room. Purchase required at landing page.' });
-      return;
-    }
-    
-    const record = getRoomRecord(roomName);
-    if (!record) {
-      const result = createRoomRecord({
-        roomName,
-        ownerPassword: password,
-        privacy
-      });
-      reply(result.ok ? { ok: true } : { ok: false, error: result.error });
-      return;
-    }
-    if (record.ownerPassword) {
-      if (record.ownerPassword !== String(password || '')) {
-        reply({ ok: false, error: 'Invalid room password.' });
-        return;
-      }
-      reply({ ok: true });
-      return;
-    }
-    updateRoomRecord(roomName, (room) => {
-      room.ownerPassword = String(password);
-      room.privacy = privacy === 'private' ? 'private' : 'public';
-    });
-    reply({ ok: true });
+    reply({ ok: false, error: 'Room claiming is disabled. Please purchase a room.' });
   });
 
   socket.on('enter-host-room', ({ roomName, password, privacy } = {}, callback) => {
@@ -436,7 +405,7 @@ io.on('connection', (socket) => {
       // Password verified - mark as authenticated
       if (!socket.data.hostAuthRooms) socket.data.hostAuthRooms = new Set();
       socket.data.hostAuthRooms.add(normalizedName);
-      
+
       // Create room record if doesn't exist
       const record = getRoomRecord(normalizedName);
       if (!record) {
