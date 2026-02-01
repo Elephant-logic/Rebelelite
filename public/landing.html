@@ -1,0 +1,290 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <title>Rebel Stream • Foundation Edition</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <link rel="stylesheet" href="style.css" />
+  <script src="https://js.stripe.com/v3/"></script>
+  <script src="/socket.io/socket.io.js"></script>
+  <style>
+    .foundation-banner {
+      background: linear-gradient(135deg, #4af3a3 0%, #2ecc71 100%);
+      color: #000;
+      padding: 20px;
+      border-radius: var(--radius-xl);
+      margin-bottom: 20px;
+      text-align: center;
+    }
+    .foundation-banner h2 {
+      margin: 0 0 10px;
+      font-size: 1.8rem;
+      color: #000;
+    }
+    .foundation-progress {
+      background: rgba(0, 0, 0, 0.2);
+      border-radius: 999px;
+      height: 30px;
+      margin: 15px 0;
+      overflow: hidden;
+    }
+    .foundation-progress-bar {
+      background: #000;
+      height: 100%;
+      transition: width 0.5s ease;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      color: var(--accent);
+      font-weight: 700;
+      font-size: 0.85rem;
+    }
+    .foundation-stats {
+      display: flex;
+      justify-content: space-around;
+      margin-top: 15px;
+      font-weight: 600;
+    }
+    .foundation-stat-value {
+      font-size: 2rem;
+      font-weight: 800;
+    }
+    .foundation-stat-label {
+      font-size: 0.9rem;
+      opacity: 0.8;
+    }
+    .badge-foundation {
+      display: inline-block;
+      background: linear-gradient(135deg, #ffd700, #ffed4e);
+      color: #000;
+      padding: 4px 10px;
+      border-radius: 4px;
+      font-size: 0.7rem;
+      font-weight: 800;
+      margin-left: 8px;
+      box-shadow: 0 2px 8px rgba(255, 215, 0, 0.3);
+    }
+    .room-card.foundation-room {
+      border: 2px solid var(--accent);
+      background: linear-gradient(135deg, rgba(74, 243, 163, 0.1), rgba(74, 243, 163, 0.05));
+    }
+    .purchase-step { display: none; }
+    .purchase-step.active { display: block; }
+    .name-check-result {
+      margin-top: 10px;
+      padding: 10px;
+      border-radius: 8px;
+      font-size: 0.85rem;
+      font-weight: 600;
+    }
+    .name-check-result.available {
+      background: rgba(74, 243, 163, 0.2);
+      color: var(--accent);
+      border: 1px solid var(--accent);
+    }
+    .name-check-result.taken {
+      background: rgba(255, 75, 106, 0.2);
+      color: var(--danger);
+      border: 1px solid var(--danger);
+    }
+    .price-display {
+      font-size: 2.5rem;
+      font-weight: 800;
+      color: var(--accent);
+      margin: 20px 0;
+      text-align: center;
+    }
+    .price-display small {
+      font-size: 1rem;
+      color: var(--muted);
+      display: block;
+      margin-top: 5px;
+    }
+  </style>
+</head>
+<body>
+  <div class="app-shell landing-shell">
+    <header class="topbar">
+      <div>
+        <h1 class="logo-text">Rebel <span class="logo-highlight">Stream</span></h1>
+        <p class="subtitle">Foundation Edition • Permanent Ownership</p>
+      </div>
+      <div class="status-block">
+        <span class="status-dot status-connected">Live Directory</span>
+        <span class="room-info" id="foundationCounter">Loading...</span>
+      </div>
+    </header>
+
+    <!-- Foundation Banner -->
+    <div class="foundation-banner">
+      <h2>🏆 Foundation Room Registry</h2>
+      <p>Own your room name forever. Only 2,000 available. One-time payment. No subscriptions.</p>
+      
+      <div class="foundation-progress">
+        <div class="foundation-progress-bar" id="foundationProgressBar" style="width: 0%">
+          <span id="foundationProgressText">0%</span>
+        </div>
+      </div>
+
+      <div class="foundation-stats">
+        <div class="foundation-stat">
+          <div class="foundation-stat-value" id="statSold">0</div>
+          <div class="foundation-stat-label">Sold</div>
+        </div>
+        <div class="foundation-stat">
+          <div class="foundation-stat-value" id="statRemaining">2000</div>
+          <div class="foundation-stat-label">Remaining</div>
+        </div>
+        <div class="foundation-stat">
+          <div class="foundation-stat-value">$29.99</div>
+          <div class="foundation-stat-label">One-Time</div>
+        </div>
+      </div>
+    </div>
+
+    <main class="landing-grid">
+      <section class="landing-card">
+        <div class="landing-card-header">
+          <h2>Live Public Rooms</h2>
+          <button id="refreshRoomsBtn" class="btn small secondary">Refresh</button>
+        </div>
+        <p class="landing-muted">Discover rooms that are currently live and public.</p>
+        <div id="publicRoomsGrid" class="rooms-grid"></div>
+        <p id="publicRoomsEmpty" class="landing-empty">No live public rooms yet.</p>
+      </section>
+
+      <!-- NEW: Purchase Foundation Room -->
+      <section class="landing-card">
+        <h2>🏆 Purchase Foundation Room</h2>
+        <p class="landing-muted">Secure your permanent room name with lifetime ownership.</p>
+        
+        <!-- Step 1: Choose Name -->
+        <div id="purchaseStep1" class="purchase-step active">
+          <form id="checkNameForm" class="landing-form">
+            <div class="field">
+              <label>Choose Your Room Name</label>
+              <input 
+                id="purchaseRoomName" 
+                type="text" 
+                placeholder="e.g. my-awesome-stream" 
+                pattern="[a-z0-9-]{3,32}"
+                required 
+              />
+              <small style="color: var(--muted); font-size: 0.75rem;">
+                3-32 characters: lowercase letters, numbers, hyphens only
+              </small>
+            </div>
+            <button class="btn primary full-width" type="submit">Check Availability</button>
+            <div id="nameCheckResult"></div>
+          </form>
+        </div>
+
+        <!-- Step 2: Set Password & Purchase -->
+        <div id="purchaseStep2" class="purchase-step">
+          <div class="name-check-result available" style="display: block; margin-bottom: 15px;">
+            ✓ "<strong id="confirmedRoomName"></strong>" is available!
+          </div>
+
+          <form id="purchaseForm" class="landing-form">
+            <div class="field">
+              <label>Set Master Password</label>
+              <input 
+                id="purchasePassword" 
+                type="password" 
+                placeholder="Your secure password" 
+                minlength="8"
+                required 
+              />
+              <small style="color: var(--muted); font-size: 0.75rem;">
+                This password will be required to access your room as host
+              </small>
+            </div>
+
+            <div class="field">
+              <label>Confirm Password</label>
+              <input 
+                id="purchasePasswordConfirm" 
+                type="password" 
+                placeholder="Confirm your password" 
+                required 
+              />
+            </div>
+
+            <div class="field">
+              <label>Email Address</label>
+              <input 
+                id="purchaseEmail" 
+                type="email" 
+                placeholder="your@email.com" 
+                required 
+              />
+              <small style="color: var(--muted); font-size: 0.75rem;">
+                For receipt and account recovery
+              </small>
+            </div>
+
+            <div class="price-display">
+              $29.99
+              <small>One-time payment • Lifetime ownership</small>
+            </div>
+
+            <button class="btn primary full-width" type="submit">
+              🔒 Proceed to Secure Checkout
+            </button>
+
+            <button class="btn secondary full-width" type="button" id="backToStep1">
+              ← Choose Different Name
+            </button>
+
+            <div id="purchaseStatus" class="status-message"></div>
+          </form>
+        </div>
+      </section>
+
+      <section class="landing-card">
+        <h2>Claim Your Room Name</h2>
+        <p class="landing-muted">Reserve your show name with a host password. Free for now.</p>
+        <form id="claimRoomForm" class="landing-form">
+          <div class="field">
+            <label>Room Name</label>
+            <input id="claimRoomName" type="text" placeholder="e.g. rebel-night-show" required />
+          </div>
+          <div class="field">
+            <label>Room Password</label>
+            <input id="claimRoomPassword" type="text" placeholder="Choose a host password" required />
+          </div>
+          <div class="field">
+            <label>Privacy</label>
+            <select id="claimRoomPrivacy" class="select-input">
+              <option value="public" selected>Public</option>
+              <option value="private">Private</option>
+            </select>
+          </div>
+          <button class="btn primary full-width" type="submit">Claim Room</button>
+          <div id="claimRoomStatus" class="status-message"></div>
+        </form>
+      </section>
+
+      <section class="landing-card">
+        <h2>Host a Room</h2>
+        <p class="landing-muted">Enter the studio for an existing room name.</p>
+        <form id="hostRoomForm" class="landing-form">
+          <div class="field">
+            <label>Room Name</label>
+            <input id="hostRoomName" type="text" placeholder="e.g. rebel-night-show" required />
+          </div>
+          <div class="field">
+            <label>Host Password (if claimed)</label>
+            <input id="hostRoomPassword" type="text" placeholder="Optional if unclaimed" />
+          </div>
+          <button class="btn primary full-width" type="submit">Enter Host Studio</button>
+          <div id="hostRoomStatus" class="status-message"></div>
+        </form>
+      </section>
+
+    </main>
+  </div>
+
+  <script src="landing.js"></script>
+</body>
+</html>
