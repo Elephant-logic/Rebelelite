@@ -7,8 +7,6 @@ const $ = id => document.getElementById(id);
 const publicRoomsGrid = $('publicRoomsGrid');
 const publicRoomsEmpty = $('publicRoomsEmpty');
 const refreshRoomsBtn = $('refreshRoomsBtn');
-const claimRoomForm = $('claimRoomForm');
-const claimRoomStatus = $('claimRoomStatus');
 const hostRoomForm = $('hostRoomForm');
 const hostRoomStatus = $('hostRoomStatus');
 
@@ -240,32 +238,6 @@ if (purchaseForm) {
 
 if (refreshRoomsBtn) {
   refreshRoomsBtn.onclick = requestPublicRooms;
-}
-
-if (claimRoomForm) {
-  claimRoomForm.addEventListener('submit', event => {
-    event.preventDefault();
-    const name = $('claimRoomName')?.value.trim();
-    const password = $('claimRoomPassword')?.value.trim();
-    const privacyValue = $('claimRoomPrivacy')?.value || 'public';
-
-    if (!name || !password) {
-      setStatus(claimRoomStatus, 'Room name and password are required.', 'error');
-      return;
-    }
-
-    setStatus(claimRoomStatus, 'Claiming room...', '');
-    socket.emit('claim-room', { name, password, privacy: privacyValue }, response => {
-      if (response?.ok) {
-        setStatus(claimRoomStatus, 'Room claimed. Redirecting to host studio...', 'ok');
-        sessionStorage.setItem(`hostPassword:${name}`, password);
-        sessionStorage.setItem(`hostAccess:${name}`, '1');
-        window.location.href = `/index.html?room=${encodeURIComponent(name)}&role=host&authed=1`;
-      } else {
-        setStatus(claimRoomStatus, response?.error || 'Unable to claim room.', 'error');
-      }
-    });
-  });
 }
 
 if (hostRoomForm) {
