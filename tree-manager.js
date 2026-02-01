@@ -10,13 +10,13 @@ class TreeManager {
 
   initializeRoom(roomName, hostSocketId) {
     if (this.trees.has(roomName)) return;
-    
+
     const tree = {
       host: hostSocketId,
       nodes: new Map(),
       orphans: new Set()
     };
-    
+
     tree.nodes.set(hostSocketId, {
       socketId: hostSocketId,
       type: 'host',
@@ -26,7 +26,7 @@ class TreeManager {
       tier: 0,
       lastSeen: Date.now()
     });
-    
+
     this.trees.set(roomName, tree);
     console.log(`[Tree] Initialized: ${roomName}`);
     return tree;
@@ -87,20 +87,21 @@ class TreeManager {
 
   removeViewer(roomName, viewerSocketId) {
     const tree = this.trees.get(roomName);
-    if (!tree) return { orphans: [] };
+    if (!tree) return { orphans: [], parentId: null };
 
     const node = tree.nodes.get(viewerSocketId);
-    if (!node) return { orphans: [] };
+    if (!node) return { orphans: [], parentId: null };
 
+    const parentId = node.parent || null;
     const orphans = Array.from(node.children);
-    
+
     if (node.parent) {
       const parent = tree.nodes.get(node.parent);
       if (parent) parent.children.delete(viewerSocketId);
     }
 
     tree.nodes.delete(viewerSocketId);
-    return { orphans };
+    return { orphans, parentId };
   }
 
   reassignOrphans(roomName, orphans) {
@@ -114,7 +115,7 @@ class TreeManager {
       if (!orphanNode) return;
 
       const newParent = this.findBestParent(roomName);
-      
+
       if (newParent) {
         orphanNode.parent = newParent.socketId;
         orphanNode.tier = newParent.tier + 1;
